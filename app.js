@@ -51,6 +51,11 @@ const fmtDur = (ms) => {
   const m = Math.max(0, Math.floor(ms / 60000));
   return Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min';
 };
+// Polska odmiana: 1 kurs, 2 kursy, 5 kursów.
+function plural(n, one, few, many) {
+  const w = n === 1 ? one : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) ? few : many;
+  return n + ' ' + w;
+}
 const pad = (n) => String(n).padStart(2, '0');
 function toLocalInput(iso) {
   if (!iso) return '';
@@ -191,7 +196,7 @@ function shiftCard(s) {
   return `<button class="item" data-go="#/zmiana/${s.id}">
     <span class="t">${fmtDay(s.start)}, ${fmtTime(s.start)}–${s.end ? fmtTime(s.end) : 'trwa'}</span>
     <span class="a">${fmtMoney(st.net)}</span>
-    <span class="s">${fmtDur(st.ms)} · ${st.rides.length} kursów · ${fmtMoney(st.revenue)} − paliwo ${fmtMoney(st.fuel)}</span>
+    <span class="s">${fmtDur(st.ms)} · ${plural(st.rides.length, 'kurs', 'kursy', 'kursów')} ·${fmtMoney(st.revenue)} − paliwo ${fmtMoney(st.fuel)}</span>
   </button>`;
 }
 
@@ -328,7 +333,7 @@ function viewHistory() {
   const monthName = now.toLocaleDateString('pl-PL', { month: 'long' });
 
   return header('Historia', { back: true }) + `<main>
-    <h2>${esc(monthName)} · ${monthShifts.length} zmian</h2>
+    <h2>${esc(monthName)} · ${plural(monthShifts.length, 'zmiana', 'zmiany', 'zmian')}</h2>
     ${statsGrid(month)}
     <h2>Zmiany</h2>
     ${shifts.length ? `<div class="list">${shifts.map(shiftCard).join('')}</div>` : '<p class="muted">Jeszcze nie ma żadnej zmiany.</p>'}
@@ -396,7 +401,7 @@ const actions = {
   },
 
   exportCsv() {
-    const num = (n) => (n == null ? '' : String(Math.round(n * 100) / 100).replace('.', ','));
+    const num = (n) => (n == null ? '' : n.toFixed(2).replace('.', ','));
     const cell = (v) => {
       const s = String(v ?? '');
       return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -404,7 +409,7 @@ const actions = {
     const rows = [['Typ', 'Zmiana', 'Początek', 'Koniec', 'Czas (h)', 'Skąd', 'Dokąd', 'Kwota (zł)', 'Paliwo', 'Litry']];
     [...db.shifts].sort((a, b) => byTime(a.start, b.start)).forEach((s) => {
       const st = stats(s);
-      const day = csvDate(s.start);
+      const day = csvDate(s.start).slice(0, 10);
       rows.push(['Zmiana', day, csvDate(s.start), csvDate(s.end), s.end ? num(st.ms / 3600000) : '', '', '', '', '', '']);
       st.rides.forEach((r) => rows.push(['Kurs', day, csvDate(r.depart), csvDate(r.arrive), '', r.from, r.to, num(r.amount), '', '']));
       st.fuels.forEach((f) => rows.push(['Tankowanie', day, csvDate(f.at), '', '', '', '', num(f.amount), f.type, num(f.liters)]));

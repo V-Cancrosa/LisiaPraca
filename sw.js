@@ -1,5 +1,5 @@
 // Zmień numer przy każdej publikacji, żeby telefony pobrały nową wersję.
-const CACHE = 'lisiapraca-v1';
+const CACHE = 'lisiapraca-v2';
 const ASSETS = [
   './',
   'index.html',
