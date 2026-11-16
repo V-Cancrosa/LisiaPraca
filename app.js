@@ -1,34 +1,59 @@
 'use strict';
 
-/* ---------- Dane ---------- */
+/* =========================================================
+   Dane
+   ========================================================= */
 
 const KEY = 'lisiapraca.v1';
 const $app = document.getElementById('app');
 
+// Stawki domyślne (sprawdź w swoich rozliczeniach i popraw w Ustawieniach).
+const DEFAULTS = {
+  commission: 25,     // prowizja Ubera od ceny przejazdu, %
+  vatCommission: 23,  // VAT doliczany do prowizji, %
+  vatFare: 8,         // VAT od przejazdu potrącany przez flotę, %
+  fleetPct: 0,        // procentowa opłata floty od kwoty od Ubera, %
+  fleetWeekly: 0,     // stała opłata floty, zł/tydzień
+};
+
 let db = load();
 
+function emptyDb() {
+  return { version: 2, shifts: [], rides: [], fuels: [], settings: { ...DEFAULTS } };
+}
+
+// Przenosi dane ze starszych wersji aplikacji do obecnego układu.
+function migrate(d) {
+  if (!d || !Array.isArray(d.shifts)) return emptyDb();
+  d.rides = d.rides || [];
+  d.fuels = d.fuels || [];
+  if (!d.version || d.version < 2) {
+    d.rides = d.rides.map((r) => ({
+      id: r.id, shiftId: r.shiftId, from: r.from || '', to: r.to || '',
+      offer: null, etaPickup: null, etaTrip: null,
+      accepted: r.depart || null, atPickup: null, tripStart: r.depart || null, end: r.arrive || null,
+      final: r.amount ?? null, riderPaid: null, tip: null, cancelled: false,
+    }));
+    d.fuels = d.fuels.map((f) => ({ ...f, odometer: f.odometer ?? null, full: f.full ?? true }));
+    d.version = 2;
+  }
+  d.settings = { ...DEFAULTS, ...(d.settings || {}) };
+  return d;
+}
+
 function load() {
-  try {
-    const d = JSON.parse(localStorage.getItem(KEY));
-    if (d && Array.isArray(d.shifts)) {
-      return { shifts: d.shifts, rides: d.rides || [], fuels: d.fuels || [] };
-    }
-  } catch (e) { /* brak lub uszkodzone dane */ }
-  return { shifts: [], rides: [], fuels: [] };
+  try { return migrate(JSON.parse(localStorage.getItem(KEY))); } catch (e) { return emptyDb(); }
 }
 
 function save() {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(db));
-  } catch (e) {
-    alert('Nie udało się zapisać danych: ' + e.message);
-  }
+  try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { alert('Nie udało się zapisać danych: ' + e.message); }
 }
 
-// Poproś przeglądarkę, żeby nie czyściła danych przy braku miejsca.
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
-/* ---------- Pomocnicze ---------- */
+/* =========================================================
+   Pomocnicze
+   ========================================================= */
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const nowIso = () => new Date().toISOString();
@@ -43,7 +68,10 @@ function parseNum(v) {
   return Number(s);
 }
 
-const fmtMoney = (n) => (n || 0).toLocaleString('pl-PL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' zł';
+const nf = (n, d = 2) => (n ?? 0).toLocaleString('pl-PL', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtMoney = (n) => nf(n) + ' zł';
+const fmtPct = (x) => nf(x * 100, 1) + '%';
+const fmtKm = (n) => Math.round(n).toLocaleString('pl-PL') + ' km';
 const fmtInputNum = (n) => (n == null ? '' : String(n).replace('.', ','));
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '—');
 const fmtDay = (iso) => new Date(iso).toLocaleDateString('pl-PL', { weekday: 'short', day: 'numeric', month: 'short' });
@@ -51,25 +79,29 @@ const fmtDur = (ms) => {
   const m = Math.max(0, Math.floor(ms / 60000));
   return Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min';
 };
-// Polska odmiana: 1 kurs, 2 kursy, 5 kursów.
-function plural(n, one, few, many) {
-  const w = n === 1 ? one : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) ? few : many;
-  return n + ' ' + w;
-}
+const fmtMin = (ms) => Math.max(0, Math.round(ms / 60000)) + ' min';
 const pad = (n) => String(n).padStart(2, '0');
-function toLocalInput(iso) {
+const toLocalInput = (iso) => {
   if (!iso) return '';
   const d = new Date(iso);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
+};
 const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
 const csvDate = (iso) => {
   if (!iso) return '';
   const d = new Date(iso);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
+const msBetween = (a, b) => (a && b ? new Date(b) - new Date(a) : null);
+
+// Polska odmiana: 1 kurs, 2 kursy, 5 kursów.
+function plural(n, one, few, many) {
+  const w = n === 1 ? one : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) ? few : many;
+  return n + ' ' + w;
+}
 
 function toast(msg) {
+  document.querySelectorAll('.toast').forEach((t) => t.remove());
   const t = document.createElement('div');
   t.className = 'toast';
   t.setAttribute('role', 'status');
@@ -78,30 +110,141 @@ function toast(msg) {
   setTimeout(() => t.remove(), 2200);
 }
 
-/* ---------- Zapytania ---------- */
-
-const activeShift = () => db.shifts.find((s) => !s.end) || null;
-const activeRide = () => db.rides.find((r) => r.depart && !r.arrive) || null;
-const byTime = (a, b) => (a || '').localeCompare(b || '');
-const ridesOf = (id) => db.rides.filter((r) => r.shiftId === id).sort((a, b) => byTime(a.depart, b.depart));
-const fuelsOf = (id) => db.fuels.filter((f) => f.shiftId === id).sort((a, b) => byTime(a.at, b.at));
-const shiftsDesc = () => [...db.shifts].sort((a, b) => byTime(b.start, a.start));
-
-function stats(shift) {
-  const rides = ridesOf(shift.id);
-  const fuels = fuelsOf(shift.id);
-  const revenue = rides.reduce((s, r) => s + (r.amount || 0), 0);
-  const fuel = fuels.reduce((s, f) => s + (f.amount || 0), 0);
-  const ms = new Date(shift.end || Date.now()) - new Date(shift.start);
-  const hours = ms / 3600000;
-  return { rides, fuels, revenue, fuel, net: revenue - fuel, ms, perHour: hours >= 0.25 ? revenue / hours : null };
+// Okno z pytaniem zamiast systemowego confirm().
+function ask(msg, okLabel = 'Tak', { danger = false, cancelLabel = 'Anuluj' } = {}) {
+  return new Promise((resolve) => {
+    const bg = document.createElement('div');
+    bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal glass" role="dialog" aria-modal="true">
+      <p>${esc(msg)}</p>
+      <div class="row2">
+        <button class="btn ghost" data-r="0">${esc(cancelLabel)}</button>
+        <button class="btn ${danger ? 'red' : 'accent'}" data-r="1">${esc(okLabel)}</button>
+      </div></div>`;
+    const close = (val) => {
+      bg.classList.add('out');
+      setTimeout(() => bg.remove(), 250);
+      resolve(val);
+    };
+    bg.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-r]');
+      if (b) close(b.dataset.r === '1');
+      else if (e.target === bg) close(false);
+    });
+    document.body.appendChild(bg);
+    bg.querySelector('[data-r="1"]').focus();
+  });
 }
 
-// Ostatnio używane miejsca do podpowiedzi przy wpisywaniu.
+/* =========================================================
+   Rozliczenia (szacunki na podstawie Ustawień)
+   ========================================================= */
+
+const rates = () => {
+  const s = db.settings;
+  return { c: s.commission / 100, v: s.vatCommission / 100, vf: s.vatFare / 100, fp: s.fleetPct / 100, fw: s.fleetWeekly };
+};
+
+// Część ceny, która zostaje po prowizji i VAT od prowizji.
+const keepAfterUber = () => { const { c, v } = rates(); return 1 - c - c * v; };
+
+// Oferta pokazuje cenę po prowizji, ale przed VAT od prowizji.
+function expectedFinalFromOffer(offer) {
+  const { c } = rates();
+  return offer == null || c >= 1 ? null : offer * keepAfterUber() / (1 - c);
+}
+
+// Szacunkowa kwota na rękę z kwoty od Ubera: minus VAT od przejazdu i opłata procentowa floty.
+function payoutFromFinal(final) {
+  if (!final) return 0;
+  const { vf, fp } = rates();
+  const k = keepAfterUber();
+  const gross = k > 0 ? final / k : final;
+  return final - gross * vf / (1 + vf) - final * fp;
+}
+
+const rideEarning = (r) => (r.final || 0) + (r.tip || 0);
+const ridePayout = (r) => payoutFromFinal(r.final) + (r.tip || 0);
+
+/* =========================================================
+   Zapytania
+   ========================================================= */
+
+const activeShift = () => db.shifts.find((s) => !s.end) || null;
+const activeRide = () => db.rides.find((r) => !r.end) || null;
+const byTime = (a, b) => (a || '').localeCompare(b || '');
+const ridesOf = (id) => db.rides.filter((r) => r.shiftId === id).sort((a, b) => byTime(a.accepted, b.accepted));
+const shiftsDesc = () => [...db.shifts].sort((a, b) => byTime(b.start, a.start));
+
+function rideStats(rides, msInApp) {
+  const done = rides.filter((r) => r.end && !r.cancelled);
+  const cancelled = rides.filter((r) => r.cancelled);
+  const earned = rides.reduce((s, r) => s + rideEarning(r), 0);
+  const payout = rides.reduce((s, r) => s + ridePayout(r), 0);
+  const withOffer = done.filter((r) => r.offer > 0 && r.final != null);
+  const offerSum = withOffer.reduce((s, r) => s + r.offer, 0);
+  const offerFinal = withOffer.reduce((s, r) => s + r.final, 0);
+  const withGross = done.filter((r) => r.riderPaid > 0 && r.final != null);
+  const grossSum = withGross.reduce((s, r) => s + r.riderPaid, 0);
+  const grossFinal = withGross.reduce((s, r) => s + r.final, 0);
+  const onTrip = done.reduce((s, r) => s + (msBetween(r.tripStart, r.end) || 0), 0);
+  const hours = msInApp / 3600000;
+  return {
+    done, cancelled, earned, payout, ms: msInApp, onTrip,
+    perHour: hours >= 0.25 ? earned / hours : null,
+    offerCut: offerSum > 0 ? 1 - offerFinal / offerSum : null, offerN: withOffer.length,
+    uberCut: grossSum > 0 ? 1 - grossFinal / grossSum : null, grossN: withGross.length,
+    busy: msInApp > 0 ? onTrip / msInApp : null,
+  };
+}
+
+function shiftStats(s) {
+  return rideStats(ridesOf(s.id), new Date(s.end || Date.now()) - new Date(s.start));
+}
+
+// Spalanie metodą „od pełna do pełna”, osobno dla każdego paliwa.
+function fuelAnalysis() {
+  const per = {};
+  const avg = {};
+  ['LPG', 'Benzyna'].forEach((type) => {
+    const fills = db.fuels.filter((f) => f.type === type).sort((a, b) => byTime(a.at, b.at));
+    let lastKm = null;
+    let liters = 0;
+    let sumKm = 0;
+    let sumL = 0;
+    fills.forEach((f) => {
+      liters += f.liters || 0;
+      if (!f.full) return;
+      if (f.odometer == null) { lastKm = null; liters = 0; return; }
+      if (lastKm != null && f.odometer > lastKm) {
+        const km = f.odometer - lastKm;
+        per[f.id] = { km, liters, per100: liters / km * 100 };
+        sumKm += km; sumL += liters;
+      }
+      lastKm = f.odometer; liters = 0;
+    });
+    avg[type] = sumKm > 0 ? { km: sumKm, liters: sumL, per100: sumL / sumKm * 100 } : null;
+  });
+
+  // Koszt paliwa na 100 km na całym odcinku między pierwszym a ostatnim odczytem licznika.
+  const withKm = db.fuels.filter((f) => f.odometer != null).sort((a, b) => byTime(a.at, b.at));
+  let cost = null;
+  let span = null;
+  if (withKm.length >= 2) {
+    const first = withKm[0];
+    const last = withKm[withKm.length - 1];
+    span = last.odometer - first.odometer;
+    const money = db.fuels.filter((f) => f.at > first.at && f.at <= last.at).reduce((s, f) => s + (f.amount || 0), 0);
+    if (span > 0 && money > 0) cost = money / span * 100;
+  }
+  const lastOdo = withKm.length ? withKm[withKm.length - 1].odometer : null;
+  return { per, avg, cost, span, lastOdo };
+}
+
 function recentPlaces() {
   const seen = new Set();
   const out = [];
-  [...db.rides].sort((a, b) => byTime(b.depart, a.depart)).forEach((r) => {
+  [...db.rides].sort((a, b) => byTime(b.accepted, a.accepted)).forEach((r) => {
     [r.from, r.to].forEach((p) => {
       const k = (p || '').trim();
       if (k && !seen.has(k.toLowerCase())) { seen.add(k.toLowerCase()); out.push(k); }
@@ -110,7 +253,16 @@ function recentPlaces() {
   return out.slice(0, 40);
 }
 
-/* ---------- Nawigacja ---------- */
+/* =========================================================
+   Nawigacja
+   ========================================================= */
+
+const TABS = [
+  { hash: '#/', label: 'Zmiana', ic: '🚗' },
+  { hash: '#/auto', label: 'Auto', ic: '⛽' },
+  { hash: '#/historia', label: 'Historia', ic: '📅' },
+  { hash: '#/ustawienia', label: 'Ustawienia', ic: '⚙️' },
+];
 
 function go(hash) {
   const i = (history.state && history.state.i) || 0;
@@ -118,146 +270,214 @@ function go(hash) {
   route();
 }
 
+function tab(hash) {
+  history.replaceState({ i: 0 }, '', hash);
+  route();
+}
+
 // Powrót po zapisaniu: cofnij, jeśli przyszliśmy z aplikacji, inaczej przejdź na start.
 function done(target = '#/') {
   if (history.state && history.state.i > 0) history.back();
-  else { history.replaceState({ i: 0 }, '', target); route(); }
+  else tab(target);
 }
 
 window.addEventListener('popstate', route);
 
+function currentTab() {
+  const h = location.hash || '#/';
+  const t = TABS.find((x) => x.hash !== '#/' && h.startsWith(x.hash));
+  return t ? t.hash : '#/';
+}
+
 function route() {
   const [page, id] = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  let html;
-  switch (page) {
-    case 'kurs': html = id ? viewRideEdit(id) : viewRideNew(); break;
-    case 'tankowanie': html = viewFuel(id); break;
-    case 'historia': html = viewHistory(); break;
-    case 'zmiana': html = viewShift(id); break;
-    default: html = viewHome();
-  }
+  const views = {
+    kurs: () => (id ? viewRideEdit(id) : viewOffer()),
+    koniec: () => viewFinish(id, false),
+    anulowany: () => viewFinish(id, true),
+    tankowanie: () => viewFuel(id),
+    zmiana: () => viewShift(id),
+    auto: viewAuto,
+    historia: viewHistory,
+    ustawienia: viewSettings,
+  };
+  let html = (views[page] || viewHome)();
   if (html == null) { history.replaceState({ i: 0 }, '', '#/'); html = viewHome(); }
-  $app.innerHTML = html;
+  const cur = currentTab();
+  $app.innerHTML = html + `<nav class="tabs" aria-label="Menu">${TABS.map((t) =>
+    `<button data-tab="${t.hash}" ${t.hash === cur ? 'aria-current="page"' : ''}><span class="ic" aria-hidden="true">${t.ic}</span>${t.label}</button>`).join('')}</nav>`;
   window.scrollTo(0, 0);
   const f = $app.querySelector('[data-autofocus]');
   if (f) f.focus();
+  updateEstimates();
 }
 
-/* ---------- Widoki ---------- */
+/* =========================================================
+   Widoki – części wspólne
+   ========================================================= */
 
-function header(title, { back = false, right = '' } = {}) {
+function header(title, back = false) {
   return `<header>
-    ${back ? '<button class="nav" data-act="back" aria-label="Wróć">‹ Wróć</button>' : '<span></span>'}
-    <h1>${esc(title)}</h1>
-    ${right || '<span></span>'}
+    ${back ? '<button class="nav" data-act="back">‹ Wróć</button>' : '<span></span>'}
+    <h1>${esc(title)}</h1><span></span>
   </header>`;
 }
 
+function stat(k, v, d = '', cls = '') {
+  return `<div class="stat ${cls}"><div class="k">${k}</div><div class="v">${v}</div>${d ? `<div class="d">${d}</div>` : ''}</div>`;
+}
+
 function statsGrid(st) {
+  const { c, v } = rates();
+  const expCut = c < 1 ? (c * v) / (1 - c) : 0;
   return `<div class="stats">
-    <div class="stat"><div class="k">Kursy</div><div class="v">${st.rides.length}</div></div>
-    <div class="stat"><div class="k">Zarobek</div><div class="v">${fmtMoney(st.revenue)}</div></div>
-    <div class="stat"><div class="k">Paliwo</div><div class="v">${fmtMoney(st.fuel)}</div></div>
-    <div class="stat"><div class="k">Na czysto</div><div class="v ${st.net < 0 ? 'neg' : ''}">${fmtMoney(st.net)}</div></div>
-    <div class="stat wide"><div class="k">Czas w aplikacji · zarobek na godzinę</div>
-      <div class="v"><span data-dur="${st.ms}">${fmtDur(st.ms)}</span>${st.perHour != null ? ' · ' + fmtMoney(st.perHour) + '/h' : ''}</div></div>
+    ${stat('Kursy', st.done.length, st.cancelled.length ? plural(st.cancelled.length, 'anulowany', 'anulowane', 'anulowanych') : '')}
+    ${stat('Od Ubera', fmtMoney(st.earned), 'z napiwkami')}
+    ${stat('Na rękę (szac.)', fmtMoney(st.payout), 'po VAT i opłacie floty')}
+    ${stat('Na godzinę', st.perHour != null ? fmtMoney(st.perHour) : '—', 'od Ubera / czas w aplikacji')}
+    ${stat('Czas w aplikacji', fmtDur(st.ms), st.busy != null ? 'z klientem ' + fmtPct(st.busy) : '', 'wide')}
+    ${st.offerCut != null ? stat('Oferta → kwota od Ubera', '−' + fmtPct(st.offerCut),
+      `z ${plural(st.offerN, 'kursu', 'kursów', 'kursów')}, według stawek z Ustawień: −${fmtPct(expCut)}`, 'wide') : ''}
+    ${st.uberCut != null ? stat('Uber zabrał łącznie', fmtPct(st.uberCut),
+      `prowizja z VAT, z ${plural(st.grossN, 'kursu', 'kursów', 'kursów')} z wpisaną ceną klienta`, 'wide') : ''}
   </div>`;
 }
 
-function timeline(st) {
-  const items = [
-    ...st.rides.map((r) => ({ t: r.depart, html: rideItem(r) })),
-    ...st.fuels.map((f) => ({ t: f.at, html: fuelItem(f) })),
-  ].sort((a, b) => byTime(b.t, a.t));
-  if (!items.length) return '<p class="muted">Brak kursów i tankowań.</p>';
-  return `<div class="list">${items.map((i) => i.html).join('')}</div>`;
-}
-
 function rideItem(r) {
-  const open = !r.arrive;
-  return `<button class="item ${open ? 'open' : ''}" data-go="#/kurs/${r.id}">
+  const open = !r.end;
+  const status = r.cancelled ? 'anulowany' : open ? 'w trakcie' : fmtTime(r.end);
+  const sub = r.offer != null && !r.cancelled ? `<small>oferta ${nf(r.offer)}</small>` : '';
+  return `<button class="item glass ${open ? 'open' : ''} ${r.cancelled ? 'cancel' : ''}" data-go="#/kurs/${r.id}">
     <span class="t">${esc(r.from || '?')} → ${esc(r.to || '?')}</span>
-    <span class="a">${r.amount != null ? fmtMoney(r.amount) : '—'}</span>
-    <span class="s">${fmtTime(r.depart)}–${open ? 'w trasie' : fmtTime(r.arrive)}</span>
-  </button>`;
-}
-
-function fuelItem(f) {
-  const perL = f.liters ? ' · ' + fmtMoney(f.amount / f.liters) + '/l' : '';
-  return `<button class="item fuel" data-go="#/tankowanie/${f.id}">
-    <span class="t">${esc(f.type)}${f.liters ? ' · ' + fmtInputNum(f.liters) + ' l' : ''}</span>
-    <span class="a">${fmtMoney(f.amount)}</span>
-    <span class="s">${fmtTime(f.at)}${perL}</span>
+    <span class="a">${r.final != null ? fmtMoney(rideEarning(r)) : '—'}${sub}</span>
+    <span class="s">${fmtTime(r.accepted)}–${status}${r.tip ? ' · napiwek ' + fmtMoney(r.tip) : ''}</span>
   </button>`;
 }
 
 function shiftCard(s) {
-  const st = stats(s);
-  return `<button class="item" data-go="#/zmiana/${s.id}">
+  const st = shiftStats(s);
+  return `<button class="item glass" data-go="#/zmiana/${s.id}">
     <span class="t">${fmtDay(s.start)}, ${fmtTime(s.start)}–${s.end ? fmtTime(s.end) : 'trwa'}</span>
-    <span class="a">${fmtMoney(st.net)}</span>
-    <span class="s">${fmtDur(st.ms)} · ${plural(st.rides.length, 'kurs', 'kursy', 'kursów')} ·${fmtMoney(st.revenue)} − paliwo ${fmtMoney(st.fuel)}</span>
+    <span class="a">${fmtMoney(st.earned)}<small>na rękę ~${nf(st.payout)}</small></span>
+    <span class="s">${fmtDur(st.ms)} · ${plural(st.done.length, 'kurs', 'kursy', 'kursów')}${st.perHour != null ? ' · ' + fmtMoney(st.perHour) + '/h' : ''}</span>
   </button>`;
 }
 
-const historyBtn = '<button class="nav" data-go="#/historia">Historia</button>';
+function fuelItem(f, per) {
+  const p = per[f.id];
+  const tag = f.type === 'LPG' ? '<span class="tag lpg">LPG</span>' : '<span class="tag pb">PB</span>';
+  const parts = [fmtDay(f.at) + ' ' + fmtTime(f.at)];
+  if (f.odometer != null) parts.push(fmtKm(f.odometer));
+  if (!f.full) parts.push('nie do pełna');
+  return `<button class="item glass" data-go="#/tankowanie/${f.id}">
+    <span class="t">${tag}${f.liters != null ? nf(f.liters, 1) + ' l' : '—'}${f.amount ? ' · ' + fmtMoney(f.amount) : ''}</span>
+    <span class="a">${p ? nf(p.per100, 1) + ' l' : '—'}<small>${p ? 'na 100 km' : ''}</small></span>
+    <span class="s">${parts.join(' · ')}${p ? ` · ${fmtKm(p.km)}` : ''}</span>
+  </button>`;
+}
+
+const placesList = () => `<datalist id="places">${recentPlaces().map((p) => `<option value="${esc(p)}">`).join('')}</datalist>`;
+
+const numInput = (name, val, ph = '0,00', extra = '') =>
+  `<input name="${name}" inputmode="decimal" autocomplete="off" placeholder="${ph}" value="${esc(fmtInputNum(val))}" ${extra}>`;
+
+/* =========================================================
+   Widoki
+   ========================================================= */
 
 function viewHome() {
   const s = activeShift();
   if (!s) {
     const last = shiftsDesc()[0];
-    return header('Lisia Praca', { right: historyBtn }) + `<main>
-      <button class="big go" data-act="startShift">Włączam aplikację</button>
-      <p class="hint center">Naciśnij, gdy włączasz aplikację Ubera. Zapiszę godzinę startu zmiany.</p>
-      <div class="row2"><button class="btn secondary" data-go="#/tankowanie">+ Tankowanie</button>
-        <button class="btn secondary" data-go="#/historia">Historia</button></div>
-      ${last ? '<h2>Ostatnia zmiana</h2>' + statsGrid(stats(last)) + '<div style="margin-top:10px">' + shiftCard(last) + '</div>' : ''}
+    return header('Lisia Praca') + `<main>
+      <div class="glow go" style="border-radius:var(--radius)"><button class="big go" data-act="startShift">Włączam aplikację</button></div>
+      <p class="hint center">Naciśnij, gdy włączasz aplikację Ubera.</p>
+      ${last ? '<h2>Ostatnia zmiana</h2>' + statsGrid(shiftStats(last)) + '<div style="margin-top:10px">' + shiftCard(last) + '</div>' : ''}
     </main>`;
   }
 
-  const st = stats(s);
+  const st = shiftStats(s);
   const r = activeRide();
-  const rideBlock = r
-    ? `<section class="card ride-live">
-        <div class="label">W trasie od ${fmtTime(r.depart)}</div>
-        <div class="route">${esc(r.from || '?')} → ${esc(r.to || '?')}</div>
-        <form class="arrive" data-form="arrive" novalidate>
-          <label>Kwota (zł)<input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(fmtInputNum(r.amount))}"></label>
-          <button class="btn go">Dotarłem</button>
-        </form>
-        <button class="edit-link" data-go="#/kurs/${r.id}">Popraw kurs</button>
-      </section>
-      <div class="row2"><span></span><button class="btn secondary" data-go="#/tankowanie">+ Tankowanie</button></div>`
-    : `<div class="row2">
-        <button class="btn primary" data-go="#/kurs">+ Kurs</button>
-        <button class="btn secondary" data-go="#/tankowanie">+ Tankowanie</button>
-      </div>`;
+  let live = '';
+  if (r) {
+    const step = r.tripStart ? 3 : r.atPickup ? 2 : 1;
+    const stage = ['', 'Jadę po klienta', 'Czekam na klienta', 'Kurs w trakcie'][step];
+    const since = [null, r.accepted, r.atPickup, r.tripStart][step];
+    const eta = step === 1 ? r.etaPickup : step === 3 ? r.etaTrip : null;
+    const next = step === 1
+      ? '<button class="big info" data-act="atPickup">Jestem na miejscu</button>'
+      : step === 2
+        ? '<button class="big info" data-act="tripStart">Klient wsiadł</button>'
+        : `<button class="big go" data-go="#/koniec/${r.id}">Koniec kursu</button>`;
+    const exp = expectedFinalFromOffer(r.offer);
+    live = `<section class="card live glass">
+      <div class="stage"><span>${stage}</span><span>${since ? fmtMin(Date.now() - new Date(since)) : ''}${eta != null ? ' / szac. ' + eta + ' min' : ''}</span></div>
+      <div class="steps">${[1, 2, 3, 4].map((n) => `<span class="${n <= step ? 'on' : ''}"></span>`).join('')}</div>
+      <div class="route">${esc(r.from || '?')} → ${esc(r.to || '?')}</div>
+      <div class="meta">${r.offer != null ? `Oferta <b>${fmtMoney(r.offer)}</b> · od Ubera ok. <b>${fmtMoney(exp)}</b>` : 'Bez kwoty z oferty'}</div>
+      <div class="glow ${step === 3 ? 'go' : 'info'}" style="border-radius:var(--radius)">${next}</div>
+      <div class="links">
+        <button class="linkbtn" data-go="#/kurs/${r.id}">Popraw dane</button>
+        <button class="linkbtn danger" data-go="#/anulowany/${r.id}">Anulowany</button>
+      </div>
+    </section>`;
+  }
 
-  return header('Moja zmiana', { right: historyBtn }) + `<main>
+  const rides = ridesOf(s.id).slice().reverse();
+  return header('Moja zmiana') + `<main>
     <button class="big stop" data-act="endShift">Wyłączam aplikację</button>
-    <p class="since">Aplikacja włączona od <strong>${fmtTime(s.start)}</strong></p>
-    ${rideBlock}
+    <p class="since">Aplikacja włączona od <strong>${fmtTime(s.start)}</strong> · ${fmtDur(st.ms)}</p>
+    ${live || `<div class="glow info" style="border-radius:var(--radius);margin-top:18px"><button class="big info" data-go="#/kurs">+ Nowy kurs</button></div>`}
     ${statsGrid(st)}
-    <h2>Na tej zmianie</h2>
-    ${timeline(st)}
+    <h2>Kursy na tej zmianie</h2>
+    ${rides.length ? `<div class="list">${rides.map(rideItem).join('')}</div>` : '<p class="muted">Jeszcze nie ma kursów.</p>'}
   </main>`;
 }
 
-function placesList() {
-  return `<datalist id="places">${recentPlaces().map((p) => `<option value="${esc(p)}">`).join('')}</datalist>`;
-}
-
-function viewRideNew() {
+function viewOffer() {
   if (!activeShift()) return null;
   const r = activeRide();
   if (r) return viewRideEdit(r.id);
-  return header('Nowy kurs', { back: true }) + `<main>
-    <form class="stack" data-form="rideNew" novalidate>
-      <label>Skąd<input name="from" list="places" autocomplete="off" enterkeyhint="next" data-autofocus></label>
-      <label>Dokąd<input name="to" list="places" autocomplete="off" enterkeyhint="next"></label>
-      <label>Kwota (zł) <span class="opt">można wpisać też po dojeździe</span>
-        <input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" enterkeyhint="go"></label>
-      <button class="big go">Ruszam</button>
+  return header('Oferta kursu', true) + `<main>
+    <form class="stack" data-form="offer" novalidate>
+      <label>Skąd <span class="opt">w przybliżeniu, jak w ofercie</span><input name="from" list="places" autocomplete="off" data-autofocus></label>
+      <label>Dokąd<input name="to" list="places" autocomplete="off"></label>
+      <label>Kwota z oferty (zł)${numInput('offer', null, '0,00', 'data-est="offer"')}</label>
+      <p class="hint" data-est-out="offer"></p>
+      <div class="grid2">
+        <label>Dojazd do klienta <span class="opt">min</span>${numInput('etaPickup', null, '0')}</label>
+        <label>Przejazd <span class="opt">min</span>${numInput('etaTrip', null, '0')}</label>
+      </div>
+      <div class="glow go" style="border-radius:var(--radius)"><button class="big go">Przyjmuję</button></div>
+    </form>
+    ${placesList()}
+  </main>`;
+}
+
+function viewFinish(id, cancelled) {
+  const r = db.rides.find((x) => x.id === id);
+  if (!r) return null;
+  const exp = expectedFinalFromOffer(r.offer);
+  if (cancelled) {
+    return header('Kurs anulowany', true) + `<main>
+      <form class="stack" data-form="finish" data-id="${r.id}" data-cancel="1" novalidate>
+        <p class="note">${esc(r.from || '?')} → ${esc(r.to || '?')}. Jeśli Uber naliczył opłatę za anulowanie, wpisz ją poniżej.</p>
+        <label>Opłata za anulowanie (zł) <span class="opt">opcjonalnie</span>${numInput('final', null, '0,00', 'data-autofocus')}</label>
+        <button class="big stop">Zapisz jako anulowany</button>
+      </form>
+    </main>`;
+  }
+  return header('Koniec kursu', true) + `<main>
+    <form class="stack" data-form="finish" data-id="${r.id}" novalidate>
+      <label>Kwota od Ubera (zł) <span class="opt">${exp != null ? 'spodziewane ok. ' + fmtMoney(exp) : 'kwota po zakończeniu kursu'}</span>
+        ${numInput('final', null, exp != null ? fmtInputNum(Math.round(exp * 100) / 100) : '0,00', 'data-autofocus')}</label>
+      <div class="grid2">
+        <label>Klient zapłacił <span class="opt">opcjonalnie</span>${numInput('riderPaid', null)}</label>
+        <label>Napiwek <span class="opt">opcjonalnie</span>${numInput('tip', null)}</label>
+      </div>
+      <label>Skąd <span class="opt">dokładny adres</span><input name="from" list="places" autocomplete="off" value="${esc(r.from)}"></label>
+      <label>Dokąd <span class="opt">dokładny adres</span><input name="to" list="places" autocomplete="off" value="${esc(r.to)}"></label>
+      <div class="glow go" style="border-radius:var(--radius)"><button class="big go">Zapisz kurs</button></div>
     </form>
     ${placesList()}
   </main>`;
@@ -266,13 +486,24 @@ function viewRideNew() {
 function viewRideEdit(id) {
   const r = db.rides.find((x) => x.id === id);
   if (!r) return null;
-  return header('Kurs', { back: true }) + `<main>
+  const dt = (name, label) => `<label>${label}<input type="datetime-local" name="${name}" value="${toLocalInput(r[name])}"></label>`;
+  return header('Kurs', true) + `<main>
     <form class="stack" data-form="rideEdit" data-id="${r.id}" novalidate>
       <label>Skąd<input name="from" list="places" autocomplete="off" value="${esc(r.from)}"></label>
       <label>Dokąd<input name="to" list="places" autocomplete="off" value="${esc(r.to)}"></label>
-      <label>Kwota (zł)<input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(fmtInputNum(r.amount))}"></label>
-      <label>Wyjazd<input type="datetime-local" name="depart" value="${toLocalInput(r.depart)}"></label>
-      <label>Dojazd <span class="opt">puste = jeszcze w trasie</span><input type="datetime-local" name="arrive" value="${toLocalInput(r.arrive)}"></label>
+      <div class="grid2">
+        <label>Oferta (zł)${numInput('offer', r.offer)}</label>
+        <label>Od Ubera (zł)${numInput('final', r.final)}</label>
+        <label>Klient zapłacił${numInput('riderPaid', r.riderPaid)}</label>
+        <label>Napiwek${numInput('tip', r.tip)}</label>
+        <label>Szac. dojazd <span class="opt">min</span>${numInput('etaPickup', r.etaPickup, '0')}</label>
+        <label>Szac. przejazd <span class="opt">min</span>${numInput('etaTrip', r.etaTrip, '0')}</label>
+      </div>
+      ${dt('accepted', 'Przyjęty')}
+      ${dt('atPickup', 'Na miejscu')}
+      ${dt('tripStart', 'Klient wsiadł')}
+      ${dt('end', 'Koniec <span class="opt">puste = kurs trwa</span>')}
+      <label class="check"><input type="checkbox" name="cancelled" ${r.cancelled ? 'checked' : ''}> Kurs anulowany</label>
       <button class="btn accent">Zapisz</button>
       <button type="button" class="btn danger" data-act="deleteRide" data-id="${r.id}">Usuń kurs</button>
     </form>
@@ -280,151 +511,251 @@ function viewRideEdit(id) {
   </main>`;
 }
 
-function viewFuel(id) {
-  const f = id ? db.fuels.find((x) => x.id === id) : null;
-  if (id && !f) return null;
-  const type = f ? f.type : 'LPG';
-  const opt = (v) => `<label><input type="radio" name="type" value="${v}" ${type === v ? 'checked' : ''}><span>${v}</span></label>`;
-  return header(f ? 'Tankowanie' : 'Nowe tankowanie', { back: true }) + `<main>
-    <form class="stack" data-form="fuel" data-id="${f ? f.id : ''}" novalidate>
-      <fieldset class="seg"><legend>Paliwo</legend>${opt('LPG')}${opt('Benzyna')}</fieldset>
-      <label>Kwota (zł)<input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(fmtInputNum(f && f.amount))}" ${f ? '' : 'data-autofocus'}></label>
-      <label>Litry <span class="opt">opcjonalnie</span><input name="liters" inputmode="decimal" autocomplete="off" placeholder="0,0" value="${esc(fmtInputNum(f && f.liters))}"></label>
-      ${f ? `<label>Kiedy<input type="datetime-local" name="at" value="${toLocalInput(f.at)}"></label>` : ''}
-      <button class="big go">Zapisz</button>
-      ${f ? `<button type="button" class="btn danger" data-act="deleteFuel" data-id="${f.id}">Usuń tankowanie</button>` : ''}
-    </form>
-  </main>`;
-}
-
 function viewShift(id) {
   const s = db.shifts.find((x) => x.id === id);
   if (!s) return null;
-  const st = stats(s);
-  return header(fmtDay(s.start), { back: true }) + `<main>
-    ${statsGrid(st)}
-    <h2>Kursy i tankowania</h2>
-    ${timeline(st)}
+  const rides = ridesOf(s.id).slice().reverse();
+  return header(fmtDay(s.start), true) + `<main>
+    ${statsGrid(shiftStats(s))}
+    <h2>Kursy</h2>
+    ${rides.length ? `<div class="list">${rides.map(rideItem).join('')}</div>` : '<p class="muted">Brak kursów.</p>'}
     <h2>Godziny zmiany</h2>
     <form class="stack" data-form="shift" data-id="${s.id}" novalidate>
       <label>Włączenie aplikacji<input type="datetime-local" name="start" value="${toLocalInput(s.start)}"></label>
       <label>Wyłączenie aplikacji <span class="opt">puste = zmiana trwa</span><input type="datetime-local" name="end" value="${toLocalInput(s.end)}"></label>
       <button class="btn accent">Zapisz godziny</button>
-      <button type="button" class="btn danger" data-act="deleteShift" data-id="${s.id}">Usuń zmianę z kursami i tankowaniami</button>
+      <button type="button" class="btn danger" data-act="deleteShift" data-id="${s.id}">Usuń zmianę razem z kursami</button>
     </form>
   </main>`;
 }
 
+function viewAuto() {
+  const fa = fuelAnalysis();
+  const fills = [...db.fuels].sort((a, b) => byTime(b.at, a.at));
+  const avg = (t) => (fa.avg[t] ? nf(fa.avg[t].per100, 1) + ' l' : '—');
+  const avgD = (t) => (fa.avg[t] ? `na 100 km, z ${fmtKm(fa.avg[t].km)}` : 'potrzeba 2 tankowań do pełna z licznikiem');
+  return header('Auto i paliwo') + `<main>
+    <div class="glow go" style="border-radius:var(--radius)"><button class="big go" data-go="#/tankowanie">+ Tankowanie</button></div>
+    <p class="hint center">Paliwo z karty flotowej nie zmniejsza twojego zarobku. Tu liczymy tylko spalanie auta.</p>
+    <div class="stats">
+      ${stat('Spalanie LPG', avg('LPG'), avgD('LPG'))}
+      ${stat('Spalanie benzyny', avg('Benzyna'), avgD('Benzyna'))}
+      ${stat('Koszt paliwa', fa.cost != null ? fmtMoney(fa.cost) : '—', 'na 100 km, oba paliwa')}
+      ${stat('Licznik', fa.lastOdo != null ? fmtKm(fa.lastOdo) : '—', fa.span ? 'zapisane ' + fmtKm(fa.span) : '')}
+    </div>
+    <p class="hint">Spalanie liczę metodą „od pełna do pełna”: litry zatankowane od poprzedniego tankowania do pełna, podzielone przez przejechane kilometry. Wskazań komputera auta nie biorę pod uwagę, bo przy instalacji LPG liczy on zużycie tak, jakby auto jechało na benzynie.</p>
+    <h2>Tankowania</h2>
+    ${fills.length ? `<div class="list">${fills.map((f) => fuelItem(f, fa.per)).join('')}</div>` : '<p class="muted">Jeszcze nie ma tankowań.</p>'}
+  </main>`;
+}
+
+function viewFuel(id) {
+  const f = id ? db.fuels.find((x) => x.id === id) : null;
+  if (id && !f) return null;
+  const type = f ? f.type : 'LPG';
+  const lastOdo = fuelAnalysis().lastOdo;
+  const opt = (v) => `<label><input type="radio" name="type" value="${v}" ${type === v ? 'checked' : ''}><span>${v}</span></label>`;
+  return header(f ? 'Tankowanie' : 'Nowe tankowanie', true) + `<main>
+    <form class="stack" data-form="fuel" data-id="${f ? f.id : ''}" novalidate>
+      <fieldset class="seg"><legend>Paliwo</legend>${opt('LPG')}${opt('Benzyna')}</fieldset>
+      <label>Stan licznika (km) <span class="opt">${lastOdo != null && !f ? 'ostatnio ' + fmtKm(lastOdo) : 'z licznika auta'}</span>
+        <input name="odometer" inputmode="numeric" autocomplete="off" placeholder="np. 123456" value="${f && f.odometer != null ? f.odometer : ''}" ${f ? '' : 'data-autofocus'}></label>
+      <div class="grid2">
+        <label>Litry${numInput('liters', f && f.liters, '0,0')}</label>
+        <label>Kwota (zł) <span class="opt">z paragonu</span>${numInput('amount', f && f.amount)}</label>
+      </div>
+      <label class="check"><input type="checkbox" name="full" ${!f || f.full ? 'checked' : ''}> Do pełna (do odbicia pistoletu)</label>
+      ${f ? `<label>Kiedy<input type="datetime-local" name="at" value="${toLocalInput(f.at)}"></label>` : ''}
+      <div class="glow go" style="border-radius:var(--radius)"><button class="big go">Zapisz</button></div>
+      ${f ? `<button type="button" class="btn danger" data-act="deleteFuel" data-id="${f.id}">Usuń tankowanie</button>` : ''}
+    </form>
+  </main>`;
+}
+
+function weekKey(iso) {
+  const d = new Date(iso);
+  const day = (d.getDay() + 6) % 7; // poniedziałek = 0
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - day);
+  return d.toISOString().slice(0, 10);
+}
+
 function viewHistory() {
   const shifts = shiftsDesc();
-  const now = new Date();
-  const monthShifts = shifts.filter((s) => {
+  if (!shifts.length) return header('Historia') + '<main><p class="muted">Jeszcze nie ma żadnej zmiany.</p></main>';
+  const months = [];
+  shifts.forEach((s) => {
     const d = new Date(s.start);
-    return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    const key = d.getFullYear() + '-' + d.getMonth();
+    let m = months.find((x) => x.key === key);
+    if (!m) { m = { key, date: d, shifts: [] }; months.push(m); }
+    m.shifts.push(s);
   });
-  const month = monthShifts.reduce((acc, s) => {
-    const st = stats(s);
-    acc.rides.push(...st.rides); acc.revenue += st.revenue; acc.fuel += st.fuel; acc.ms += st.ms;
-    return acc;
-  }, { rides: [], fuels: [], revenue: 0, fuel: 0, ms: 0 });
-  month.net = month.revenue - month.fuel;
-  month.perHour = month.ms >= 900000 ? month.revenue / (month.ms / 3600000) : null;
-  const loose = db.fuels.filter((f) => !f.shiftId).sort((a, b) => byTime(b.at, a.at));
-  const monthName = now.toLocaleDateString('pl-PL', { month: 'long' });
+  const fw = rates().fw;
+  return header('Historia') + `<main>${months.map((m, i) => {
+    const ms = m.shifts.reduce((a, s) => a + (new Date(s.end || Date.now()) - new Date(s.start)), 0);
+    const st = rideStats(m.shifts.flatMap((s) => ridesOf(s.id)), ms);
+    const weeks = new Set(m.shifts.map((s) => weekKey(s.start))).size;
+    if (fw) st.payout -= weeks * fw;
+    const name = m.date.toLocaleDateString('pl-PL', { month: 'long', year: 'numeric' });
+    return `<h2>${esc(name)} · ${plural(m.shifts.length, 'zmiana', 'zmiany', 'zmian')}</h2>
+      ${i === 0 ? statsGrid(st) + (fw ? `<p class="hint">Na rękę uwzględnia stałą opłatę floty za ${plural(weeks, 'tydzień', 'tygodnie', 'tygodni')}.</p>` : '') + '<div style="height:10px"></div>'
+        : `<p class="hint" style="margin-bottom:10px">${fmtMoney(st.earned)} od Ubera · na rękę ~${fmtMoney(st.payout)} · ${fmtDur(ms)}</p>`}
+      <div class="list">${m.shifts.map(shiftCard).join('')}</div>`;
+  }).join('')}</main>`;
+}
 
-  return header('Historia', { back: true }) + `<main>
-    <h2>${esc(monthName)} · ${plural(monthShifts.length, 'zmiana', 'zmiany', 'zmian')}</h2>
-    ${statsGrid(month)}
-    <h2>Zmiany</h2>
-    ${shifts.length ? `<div class="list">${shifts.map(shiftCard).join('')}</div>` : '<p class="muted">Jeszcze nie ma żadnej zmiany.</p>'}
-    ${loose.length ? `<h2>Tankowania poza zmianą</h2><div class="list">${loose.map(fuelItem).join('')}</div>` : ''}
+function viewSettings() {
+  const s = db.settings;
+  const field = (name, label, hint) => `<label>${label} <span class="opt">${hint}</span>${numInput(name, s[name], '0', 'data-est="settings"')}</label>`;
+  return header('Ustawienia') + `<main>
+    <h2>Stawki do szacunków</h2>
+    <form class="stack" data-form="settings" novalidate>
+      ${field('commission', 'Prowizja Ubera (%)', 'od ceny przejazdu')}
+      ${field('vatCommission', 'VAT od prowizji (%)', 'źródła podają 23%')}
+      ${field('vatFare', 'VAT od przejazdu (%)', 'potrąca flota, 0 jeśli nie')}
+      ${field('fleetPct', 'Opłata floty (%)', 'od kwoty od Ubera')}
+      ${field('fleetWeekly', 'Opłata floty (zł/tydz.)', 'stała')}
+      <div class="card glass note" data-est-out="settings"></div>
+      <button class="btn accent">Zapisz stawki</button>
+    </form>
+    <p class="hint">Uber zmienia prowizję, więc stawki służą tylko do szacunków. Prawdziwy wynik widać, gdy przy kursach wpisujesz kwotę z oferty, kwotę od Ubera i, w miarę możliwości, cenę zapłaconą przez klienta.</p>
     <h2>Dane</h2>
     <div class="tools">
-      <button class="btn secondary" data-act="exportCsv">Eksportuj do Excela (CSV)</button>
-      <button class="btn secondary" data-act="exportJson">Zrób kopię zapasową</button>
-      <label class="btn secondary file-btn center" style="justify-content:center">Przywróć z kopii
-        <input type="file" accept="application/json,.json" data-act="importJson"></label>
+      <button class="btn ghost" data-act="exportRides">Kursy i zmiany → Excel (CSV)</button>
+      <button class="btn ghost" data-act="exportFuel">Tankowania → Excel (CSV)</button>
+      <button class="btn ghost" data-act="exportJson">Zrób kopię zapasową</button>
+      <label class="btn ghost file-btn">Przywróć z kopii<input type="file" accept="application/json,.json" data-act="importJson"></label>
     </div>
     <p class="hint">Dane są zapisane tylko na tym telefonie. Rób kopię zapasową co jakiś czas, np. raz w tygodniu.</p>
   </main>`;
 }
 
-/* ---------- Akcje ---------- */
+// Podgląd szacunków na żywo podczas wpisywania.
+function updateEstimates() {
+  const offerIn = $app.querySelector('[data-est="offer"]');
+  const offerOut = $app.querySelector('[data-est-out="offer"]');
+  if (offerIn && offerOut) {
+    const v = parseNum(offerIn.value);
+    offerOut.textContent = v > 0
+      ? `Od Ubera dostaniesz ok. ${fmtMoney(expectedFinalFromOffer(v))}, na rękę ok. ${fmtMoney(payoutFromFinal(expectedFinalFromOffer(v)))}.`
+      : 'Kwota z oferty jest już po prowizji, ale przed VAT od prowizji.';
+  }
+  const setOut = $app.querySelector('[data-est-out="settings"]');
+  if (setOut) {
+    const f = $app.querySelector('form[data-form="settings"]');
+    const val = (n) => { const x = parseNum(f.elements[n].value); return Number.isFinite(x) ? x / 100 : 0; };
+    const c = val('commission'); const v = val('vatCommission'); const vf = val('vatFare'); const fp = val('fleetPct');
+    const offer = 100 * (1 - c);
+    const final = 100 * (1 - c - c * v);
+    const pay = final - 100 * vf / (1 + vf) - final * fp;
+    setOut.innerHTML = `Przykład: klient płaci <b>100,00 zł</b> → oferta w aplikacji <b>${nf(offer)} zł</b> → od Ubera <b>${nf(final)} zł</b>
+      (prowizja z VAT ${nf(100 - final)} zł) → na rękę ok. <b>${nf(pay)} zł</b>.`;
+  }
+}
+
+/* =========================================================
+   Akcje
+   ========================================================= */
 
 const actions = {
   back: () => done(),
 
   startShift() {
-    if (activeShift()) return route();
-    db.shifts.push({ id: uid(), start: nowIso(), end: null });
+    if (!activeShift()) db.shifts.push({ id: uid(), start: nowIso(), end: null });
     save();
     route();
   },
 
-  endShift() {
+  async endShift() {
     const s = activeShift();
     if (!s) return route();
     const r = activeRide();
-    const msg = r
-      ? 'Masz kurs w trasie. Zakończyć go teraz i wyłączyć aplikację?'
-      : 'Wyłączasz aplikację i kończysz zmianę?';
-    if (!confirm(msg)) return;
+    const ok = await ask(r ? 'Masz otwarty kurs. Zakończyć go teraz i wyłączyć aplikację?' : 'Wyłączasz aplikację i kończysz zmianę?', 'Wyłączam', { danger: true });
+    if (!ok) return;
     const t = nowIso();
-    if (r) r.arrive = t;
+    if (r) r.end = t;
     s.end = t;
     save();
     route();
   },
 
-  deleteRide(el) {
-    if (!confirm('Usunąć ten kurs?')) return;
+  atPickup() {
+    const r = activeRide();
+    if (r && !r.atPickup) { r.atPickup = nowIso(); save(); }
+    route();
+  },
+
+  tripStart() {
+    const r = activeRide();
+    if (r && !r.tripStart) { r.tripStart = nowIso(); if (!r.atPickup) r.atPickup = r.tripStart; save(); }
+    route();
+  },
+
+  async deleteRide(el) {
+    if (!(await ask('Usunąć ten kurs?', 'Usuń', { danger: true }))) return;
     db.rides = db.rides.filter((r) => r.id !== el.dataset.id);
     save();
     done();
   },
 
-  deleteFuel(el) {
-    if (!confirm('Usunąć to tankowanie?')) return;
+  async deleteFuel(el) {
+    if (!(await ask('Usunąć to tankowanie?', 'Usuń', { danger: true }))) return;
     db.fuels = db.fuels.filter((f) => f.id !== el.dataset.id);
     save();
-    done();
+    done('#/auto');
   },
 
-  deleteShift(el) {
+  async deleteShift(el) {
     const id = el.dataset.id;
-    if (!confirm('Usunąć całą zmianę razem z jej kursami i tankowaniami? Tego nie da się cofnąć.')) return;
+    if (!(await ask('Usunąć całą zmianę razem z jej kursami? Tego nie da się cofnąć.', 'Usuń', { danger: true }))) return;
     db.shifts = db.shifts.filter((s) => s.id !== id);
     db.rides = db.rides.filter((r) => r.shiftId !== id);
-    db.fuels = db.fuels.filter((f) => f.shiftId !== id);
     save();
-    done();
+    done('#/historia');
   },
 
-  exportCsv() {
-    const num = (n) => (n == null ? '' : n.toFixed(2).replace('.', ','));
-    const cell = (v) => {
-      const s = String(v ?? '');
-      return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-    };
-    const rows = [['Typ', 'Zmiana', 'Początek', 'Koniec', 'Czas (h)', 'Skąd', 'Dokąd', 'Kwota (zł)', 'Paliwo', 'Litry']];
+  exportRides() {
+    const rows = [['Typ', 'Data', 'Przyjęty', 'Na miejscu', 'Klient wsiadł', 'Koniec', 'Skąd', 'Dokąd',
+      'Oferta (zł)', 'Od Ubera (zł)', 'Klient zapłacił (zł)', 'Napiwek (zł)', 'Szac. dojazd (min)', 'Szac. przejazd (min)', 'Status']];
     [...db.shifts].sort((a, b) => byTime(a.start, b.start)).forEach((s) => {
-      const st = stats(s);
       const day = csvDate(s.start).slice(0, 10);
-      rows.push(['Zmiana', day, csvDate(s.start), csvDate(s.end), s.end ? num(st.ms / 3600000) : '', '', '', '', '', '']);
-      st.rides.forEach((r) => rows.push(['Kurs', day, csvDate(r.depart), csvDate(r.arrive), '', r.from, r.to, num(r.amount), '', '']));
-      st.fuels.forEach((f) => rows.push(['Tankowanie', day, csvDate(f.at), '', '', '', '', num(f.amount), f.type, num(f.liters)]));
+      const st = shiftStats(s);
+      rows.push(['Zmiana', day, csvDate(s.start), '', '', csvDate(s.end), '', '', '', csvNum(st.earned), '', '', '', '', s.end ? 'zakończona' : 'trwa']);
+      ridesOf(s.id).forEach((r) => rows.push(['Kurs', day, csvDate(r.accepted), csvDate(r.atPickup), csvDate(r.tripStart), csvDate(r.end),
+        r.from, r.to, csvNum(r.offer), csvNum(r.final), csvNum(r.riderPaid), csvNum(r.tip), r.etaPickup ?? '', r.etaTrip ?? '',
+        r.cancelled ? 'anulowany' : r.end ? 'zakończony' : 'w trakcie']));
     });
-    db.fuels.filter((f) => !f.shiftId).forEach((f) =>
-      rows.push(['Tankowanie', '', csvDate(f.at), '', '', '', '', num(f.amount), f.type, num(f.liters)]));
-    const csv = '﻿' + rows.map((r) => r.map(cell).join(';')).join('\r\n');
-    shareOrDownload(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `lisia-praca-${csvDate(nowIso()).slice(0, 10)}.csv`);
+    downloadCsv(rows, 'kursy');
+  },
+
+  exportFuel() {
+    const per = fuelAnalysis().per;
+    const rows = [['Data', 'Paliwo', 'Litry', 'Kwota (zł)', 'Cena za litr (zł)', 'Licznik (km)', 'Do pełna', 'Km od poprzedniego pełnego', 'Spalanie (l/100 km)']];
+    [...db.fuels].sort((a, b) => byTime(a.at, b.at)).forEach((f) => {
+      const p = per[f.id];
+      rows.push([csvDate(f.at), f.type, csvNum(f.liters), csvNum(f.amount), f.amount && f.liters ? csvNum(f.amount / f.liters) : '',
+        f.odometer ?? '', f.full ? 'tak' : 'nie', p ? p.km : '', p ? csvNum(p.per100) : '']);
+    });
+    downloadCsv(rows, 'tankowania');
   },
 
   exportJson() {
-    const blob = new Blob([JSON.stringify({ app: 'LisiaPraca', version: 1, exported: nowIso(), ...db }, null, 1)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ app: 'LisiaPraca', exported: nowIso(), ...db }, null, 1)], { type: 'application/json' });
     shareOrDownload(blob, `lisia-praca-kopia-${csvDate(nowIso()).slice(0, 10)}.json`);
   },
 };
+
+const csvNum = (n) => (n == null || !Number.isFinite(n) ? '' : n.toFixed(2).replace('.', ','));
+
+function downloadCsv(rows, name) {
+  const cell = (v) => {
+    const s = String(v ?? '');
+    return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const csv = '﻿' + rows.map((r) => r.map(cell).join(';')).join('\r\n');
+  shareOrDownload(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `lisia-praca-${name}-${csvDate(nowIso()).slice(0, 10)}.csv`);
+}
 
 async function shareOrDownload(blob, name) {
   const file = new File([blob], name, { type: blob.type });
@@ -441,75 +772,101 @@ async function shareOrDownload(blob, name) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
-/* ---------- Formularze ---------- */
+/* =========================================================
+   Formularze
+   ========================================================= */
 
 // Odczytuje pole liczbowe; zaznacza błąd i zwraca undefined, gdy wpis jest niepoprawny.
-function numField(form, name, { required = false } = {}) {
+function numField(form, name, { required = false, int = false } = {}) {
   const input = form.elements[name];
-  const v = parseNum(input.value);
+  let v = parseNum(input.value);
   const bad = Number.isNaN(v) || (required && v == null) || (v != null && v < 0);
   input.classList.toggle('bad', bad);
-  if (bad) { input.focus(); toast(required && v == null ? 'Wpisz kwotę.' : 'Niepoprawna liczba. Użyj np. 42,50'); return undefined; }
+  if (bad) { input.focus(); toast(required && v == null ? 'To pole jest wymagane.' : 'Niepoprawna liczba. Użyj np. 42,50'); return undefined; }
+  if (v != null && int) v = Math.round(v);
   return v;
 }
 
+// Odczytuje kilka pól liczbowych; zwraca null, jeśli któreś jest błędne.
+function numFields(form, specs) {
+  const out = {};
+  for (const [name, opts] of Object.entries(specs)) {
+    const v = numField(form, name, opts);
+    if (v === undefined) return null;
+    out[name] = v;
+  }
+  return out;
+}
+
 const forms = {
-  rideNew(f) {
+  offer(f) {
     const shift = activeShift();
     if (!shift) return done();
-    const amount = numField(f, 'amount');
-    if (amount === undefined) return;
+    const n = numFields(f, { offer: {}, etaPickup: { int: true }, etaTrip: { int: true } });
+    if (!n) return;
     db.rides.push({
-      id: uid(), shiftId: shift.id,
-      from: f.elements.from.value.trim(), to: f.elements.to.value.trim(),
-      amount, depart: nowIso(), arrive: null,
+      id: uid(), shiftId: shift.id, from: f.elements.from.value.trim(), to: f.elements.to.value.trim(),
+      offer: n.offer, etaPickup: n.etaPickup, etaTrip: n.etaTrip,
+      accepted: nowIso(), atPickup: null, tripStart: null, end: null,
+      final: null, riderPaid: null, tip: null, cancelled: false,
     });
     save();
     done();
   },
 
-  arrive(f) {
-    const r = activeRide();
-    if (!r) return route();
-    const amount = numField(f, 'amount');
-    if (amount === undefined) return;
-    if (amount != null) r.amount = amount;
-    r.arrive = nowIso();
+  finish(f) {
+    const r = db.rides.find((x) => x.id === f.dataset.id);
+    if (!r) return done();
+    const cancel = f.dataset.cancel === '1';
+    const n = numFields(f, cancel ? { final: {} } : { final: { required: true }, riderPaid: {}, tip: {} });
+    if (!n) return;
+    Object.assign(r, n, { end: r.end || nowIso(), cancelled: cancel });
+    if (!cancel) {
+      r.from = f.elements.from.value.trim();
+      r.to = f.elements.to.value.trim();
+    }
     save();
-    toast('Kurs zapisany');
-    route();
+    toast(cancel ? 'Zapisano anulowany kurs' : 'Kurs zapisany');
+    done();
   },
 
   rideEdit(f) {
     const r = db.rides.find((x) => x.id === f.dataset.id);
     if (!r) return done();
-    const amount = numField(f, 'amount');
-    if (amount === undefined) return;
-    const depart = fromLocalInput(f.elements.depart.value) || r.depart;
-    const arrive = fromLocalInput(f.elements.arrive.value);
-    if (arrive && arrive < depart) { toast('Dojazd nie może być przed wyjazdem.'); return; }
-    if (!arrive && db.rides.some((x) => x !== r && !x.arrive)) { toast('Inny kurs jest już w trasie.'); return; }
-    Object.assign(r, { from: f.elements.from.value.trim(), to: f.elements.to.value.trim(), amount, depart, arrive });
+    const n = numFields(f, { offer: {}, final: {}, riderPaid: {}, tip: {}, etaPickup: { int: true }, etaTrip: { int: true } });
+    if (!n) return;
+    const t = {};
+    ['accepted', 'atPickup', 'tripStart', 'end'].forEach((k) => { t[k] = fromLocalInput(f.elements[k].value); });
+    if (!t.accepted) { toast('Podaj godzinę przyjęcia kursu.'); return; }
+    const order = ['accepted', 'atPickup', 'tripStart', 'end'].map((k) => t[k]).filter(Boolean);
+    if (order.some((x, i) => i > 0 && x < order[i - 1])) { toast('Godziny muszą iść po kolei.'); return; }
+    if (!t.end && db.rides.some((x) => x !== r && !x.end)) { toast('Inny kurs jest już otwarty.'); return; }
+    Object.assign(r, n, t, {
+      from: f.elements.from.value.trim(), to: f.elements.to.value.trim(), cancelled: f.elements.cancelled.checked,
+    });
     save();
     done();
   },
 
-  fuel(f) {
-    const amount = numField(f, 'amount', { required: true });
-    if (amount === undefined) return;
-    const liters = numField(f, 'liters');
-    if (liters === undefined) return;
-    const type = f.elements.type.value || 'LPG';
-    const existing = f.dataset.id && db.fuels.find((x) => x.id === f.dataset.id);
-    if (existing) {
-      Object.assign(existing, { type, amount, liters, at: fromLocalInput(f.elements.at.value) || existing.at });
-    } else {
+  async fuel(f) {
+    const n = numFields(f, { odometer: { int: true }, liters: { required: true }, amount: {} });
+    if (!n) return;
+    const existing = f.dataset.id ? db.fuels.find((x) => x.id === f.dataset.id) : null;
+    const at = existing ? fromLocalInput(f.elements.at.value) || existing.at : nowIso();
+    if (n.odometer != null) {
+      const before = db.fuels.filter((x) => x !== existing && x.odometer != null && x.at < at).sort((a, b) => byTime(b.at, a.at))[0];
+      if (before && n.odometer <= before.odometer &&
+        !(await ask(`Licznik ${fmtKm(n.odometer)} jest mniejszy niż przy poprzednim tankowaniu (${fmtKm(before.odometer)}). Zapisać mimo to?`, 'Zapisz'))) return;
+    }
+    const data = { type: f.elements.type.value || 'LPG', odometer: n.odometer, liters: n.liters, amount: n.amount, full: f.elements.full.checked, at };
+    if (existing) Object.assign(existing, data);
+    else {
       const s = activeShift();
-      db.fuels.push({ id: uid(), shiftId: s ? s.id : null, type, amount, liters, at: nowIso() });
+      db.fuels.push({ id: uid(), shiftId: s ? s.id : null, ...data });
     }
     save();
     toast('Tankowanie zapisane');
-    done();
+    done('#/auto');
   },
 
   shift(f) {
@@ -525,13 +882,27 @@ const forms = {
     toast('Zapisano');
     route();
   },
+
+  settings(f) {
+    const n = numFields(f, { commission: {}, vatCommission: {}, vatFare: {}, fleetPct: {}, fleetWeekly: {} });
+    if (!n) return;
+    Object.keys(n).forEach((k) => { if (n[k] == null) n[k] = 0; });
+    if (n.commission >= 100) { toast('Prowizja musi być mniejsza niż 100%.'); return; }
+    db.settings = { ...db.settings, ...n };
+    save();
+    toast('Stawki zapisane');
+    route();
+  },
 };
 
-/* ---------- Zdarzenia ---------- */
+/* =========================================================
+   Zdarzenia
+   ========================================================= */
 
 $app.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-go],[data-act]');
+  const el = e.target.closest('[data-go],[data-act],[data-tab]');
   if (!el || el.tagName === 'INPUT') return;
+  if (el.dataset.tab) { tab(el.dataset.tab); return; }
   if (el.dataset.go) { go(el.dataset.go); return; }
   const fn = actions[el.dataset.act];
   if (fn) fn(el, e);
@@ -543,16 +914,21 @@ $app.addEventListener('submit', (e) => {
   if (fn) fn(e.target);
 });
 
+$app.addEventListener('input', (e) => {
+  if (e.target.dataset.est) updateEstimates();
+  e.target.classList.remove('bad');
+});
+
 $app.addEventListener('change', (e) => {
   if (e.target.dataset.act !== 'importJson' || !e.target.files[0]) return;
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const d = JSON.parse(reader.result);
-      if (!d || !Array.isArray(d.shifts) || !Array.isArray(d.rides) || !Array.isArray(d.fuels)) throw new Error('To nie jest kopia Lisiej Pracy.');
-      const msg = `Kopia zawiera ${d.shifts.length} zmian, ${d.rides.length} kursów i ${d.fuels.length} tankowań. Zastąpić nią obecne dane?`;
-      if (!confirm(msg)) return;
-      db = { shifts: d.shifts, rides: d.rides, fuels: d.fuels };
+      if (!d || !Array.isArray(d.shifts) || !Array.isArray(d.rides)) throw new Error('To nie jest kopia Lisiej Pracy.');
+      const msg = `Kopia zawiera ${plural(d.shifts.length, 'zmianę', 'zmiany', 'zmian')}, ${plural(d.rides.length, 'kurs', 'kursy', 'kursów')} i ${plural((d.fuels || []).length, 'tankowanie', 'tankowania', 'tankowań')}. Zastąpić nią obecne dane?`;
+      if (!(await ask(msg, 'Zastąp', { danger: true }))) return;
+      db = migrate(d);
       save();
       toast('Przywrócono kopię');
       route();
@@ -564,15 +940,17 @@ $app.addEventListener('change', (e) => {
   e.target.value = '';
 });
 
-// Odświeżaj czas trwania zmiany co 30 s, gdy nikt nic nie wpisuje.
+// Odświeżaj liczniki czasu na ekranie zmiany, gdy nikt nic nie wpisuje.
 setInterval(() => {
-  const s = activeShift();
-  const editing = document.activeElement && document.activeElement.tagName === 'INPUT';
-  if (s && !editing && (location.hash === '' || location.hash === '#/')) route();
-}, 30000);
+  const busy = (document.activeElement && document.activeElement.tagName === 'INPUT') || document.querySelector('.modal-bg');
+  if (activeShift() && !busy && currentTab() === '#/' && (location.hash === '' || location.hash === '#/')) route();
+}, 20000);
 
-/* ---------- Start ---------- */
+/* =========================================================
+   Start
+   ========================================================= */
 
+save(); // zapisz dane po ewentualnej migracji
 history.replaceState({ i: 0 }, '', location.hash || '#/');
 route();
 
