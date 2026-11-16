@@ -7,13 +7,11 @@
 const KEY = 'lisiapraca.v1';
 const $app = document.getElementById('app');
 
-// Stawki domyślne (sprawdź w swoich rozliczeniach i popraw w Ustawieniach).
 const DEFAULTS = {
-  commission: 25,     // prowizja Ubera od ceny przejazdu, %
+  commission: 25,     // prowizja Ubera od ceny przejazdu, % (tylko do szacunku, zanim będą własne kursy)
   vatCommission: 23,  // VAT doliczany do prowizji, %
-  vatFare: 8,         // VAT od przejazdu potrącany przez flotę, %
-  fleetPct: 0,        // procentowa opłata floty od kwoty od Ubera, %
-  fleetWeekly: 0,     // stała opłata floty, zł/tydzień
+  payMode: 'none',    // jak płaci szef: 'none' | 'pct' (procent od kwoty od Ubera) | 'hour' (zł za godzinę w aplikacji)
+  payValue: 0,
 };
 
 let db = load();
@@ -140,31 +138,42 @@ function ask(msg, okLabel = 'Tak', { danger = false, cancelLabel = 'Anuluj' } = 
    Rozliczenia (szacunki na podstawie Ustawień)
    ========================================================= */
 
-const rates = () => {
-  const s = db.settings;
-  return { c: s.commission / 100, v: s.vatCommission / 100, vf: s.vatFare / 100, fp: s.fleetPct / 100, fw: s.fleetWeekly };
-};
+const rates = () => ({ c: db.settings.commission / 100, v: db.settings.vatCommission / 100 });
 
-// Część ceny, która zostaje po prowizji i VAT od prowizji.
-const keepAfterUber = () => { const { c, v } = rates(); return 1 - c - c * v; };
-
-// Oferta pokazuje cenę po prowizji, ale przed VAT od prowizji.
-function expectedFinalFromOffer(offer) {
-  const { c } = rates();
-  return offer == null || c >= 1 ? null : offer * keepAfterUber() / (1 - c);
+// Ile z kwoty z oferty faktycznie przychodzi od Ubera – liczone z ostatnich 30 twoich kursów.
+function learnedRatio() {
+  const rs = db.rides
+    .filter((r) => r.end && !r.cancelled && r.offer > 0 && r.final != null)
+    .sort((a, b) => byTime(b.end, a.end))
+    .slice(0, 30);
+  if (rs.length < 3) return null;
+  return { ratio: rs.reduce((s, r) => s + r.final, 0) / rs.reduce((s, r) => s + r.offer, 0), n: rs.length };
 }
 
-// Szacunkowa kwota na rękę z kwoty od Ubera: minus VAT od przejazdu i opłata procentowa floty.
-function payoutFromFinal(final) {
-  if (!final) return 0;
-  const { vf, fp } = rates();
-  const k = keepAfterUber();
-  const gross = k > 0 ? final / k : final;
-  return final - gross * vf / (1 + vf) - final * fp;
+// Spodziewana kwota od Ubera. Zanim będą własne kursy: oferta jest po prowizji, ale przed VAT od prowizji.
+function expectedFinalFromOffer(offer) {
+  if (offer == null) return null;
+  const l = learnedRatio();
+  if (l) return offer * l.ratio;
+  const { c, v } = rates();
+  return c >= 1 ? null : offer * (1 - c - c * v) / (1 - c);
+}
+
+function estimateSource() {
+  const l = learnedRatio();
+  return l ? `z ${plural(l.n, 'twojego kursu', 'twoich kursów', 'twoich kursów')}` : 'wstępny szacunek, do czasu 3 kursów z kwotą z oferty';
+}
+
+// Wypłata od szefa, jeśli ustawiono, jak płaci.
+function myPay(earned, ms) {
+  const { payMode, payValue } = db.settings;
+  if (!payValue) return null;
+  if (payMode === 'pct') return earned * payValue / 100;
+  if (payMode === 'hour') return ms / 3600000 * payValue;
+  return null;
 }
 
 const rideEarning = (r) => (r.final || 0) + (r.tip || 0);
-const ridePayout = (r) => payoutFromFinal(r.final) + (r.tip || 0);
 
 /* =========================================================
    Zapytania
@@ -180,7 +189,7 @@ function rideStats(rides, msInApp) {
   const done = rides.filter((r) => r.end && !r.cancelled);
   const cancelled = rides.filter((r) => r.cancelled);
   const earned = rides.reduce((s, r) => s + rideEarning(r), 0);
-  const payout = rides.reduce((s, r) => s + ridePayout(r), 0);
+  const pay = myPay(earned, msInApp);
   const withOffer = done.filter((r) => r.offer > 0 && r.final != null);
   const offerSum = withOffer.reduce((s, r) => s + r.offer, 0);
   const offerFinal = withOffer.reduce((s, r) => s + r.final, 0);
@@ -190,7 +199,7 @@ function rideStats(rides, msInApp) {
   const onTrip = done.reduce((s, r) => s + (msBetween(r.tripStart, r.end) || 0), 0);
   const hours = msInApp / 3600000;
   return {
-    done, cancelled, earned, payout, ms: msInApp, onTrip,
+    done, cancelled, earned, pay, ms: msInApp, onTrip,
     perHour: hours >= 0.25 ? earned / hours : null,
     offerCut: offerSum > 0 ? 1 - offerFinal / offerSum : null, offerN: withOffer.length,
     uberCut: grossSum > 0 ? 1 - grossFinal / grossSum : null, grossN: withGross.length,
@@ -328,16 +337,17 @@ function stat(k, v, d = '', cls = '') {
 }
 
 function statsGrid(st) {
-  const { c, v } = rates();
-  const expCut = c < 1 ? (c * v) / (1 - c) : 0;
+  const third = st.pay != null
+    ? stat('Dla mnie', fmtMoney(st.pay), db.settings.payMode === 'hour' ? 'za czas w aplikacji' : 'mój procent')
+    : stat('Średnio za kurs', st.done.length ? fmtMoney(st.earned / st.done.length) : '—', 'od Ubera');
   return `<div class="stats">
     ${stat('Kursy', st.done.length, st.cancelled.length ? plural(st.cancelled.length, 'anulowany', 'anulowane', 'anulowanych') : '')}
     ${stat('Od Ubera', fmtMoney(st.earned), 'z napiwkami')}
-    ${stat('Na rękę (szac.)', fmtMoney(st.payout), 'po VAT i opłacie floty')}
+    ${third}
     ${stat('Na godzinę', st.perHour != null ? fmtMoney(st.perHour) : '—', 'od Ubera / czas w aplikacji')}
     ${stat('Czas w aplikacji', fmtDur(st.ms), st.busy != null ? 'z klientem ' + fmtPct(st.busy) : '', 'wide')}
     ${st.offerCut != null ? stat('Oferta → kwota od Ubera', '−' + fmtPct(st.offerCut),
-      `z ${plural(st.offerN, 'kursu', 'kursów', 'kursów')}, według stawek z Ustawień: −${fmtPct(expCut)}`, 'wide') : ''}
+      `tyle mniej niż w ofercie przyszło od Ubera, z ${plural(st.offerN, 'kursu', 'kursów', 'kursów')}`, 'wide') : ''}
     ${st.uberCut != null ? stat('Uber zabrał łącznie', fmtPct(st.uberCut),
       `prowizja z VAT, z ${plural(st.grossN, 'kursu', 'kursów', 'kursów')} z wpisaną ceną klienta`, 'wide') : ''}
   </div>`;
@@ -358,7 +368,7 @@ function shiftCard(s) {
   const st = shiftStats(s);
   return `<button class="item glass" data-go="#/zmiana/${s.id}">
     <span class="t">${fmtDay(s.start)}, ${fmtTime(s.start)}–${s.end ? fmtTime(s.end) : 'trwa'}</span>
-    <span class="a">${fmtMoney(st.earned)}<small>na rękę ~${nf(st.payout)}</small></span>
+    <span class="a">${fmtMoney(st.earned)}${st.pay != null ? `<small>dla mnie ${nf(st.pay)}</small>` : ''}</span>
     <span class="s">${fmtDur(st.ms)} · ${plural(st.done.length, 'kurs', 'kursy', 'kursów')}${st.perHour != null ? ' · ' + fmtMoney(st.perHour) + '/h' : ''}</span>
   </button>`;
 }
@@ -572,14 +582,6 @@ function viewFuel(id) {
   </main>`;
 }
 
-function weekKey(iso) {
-  const d = new Date(iso);
-  const day = (d.getDay() + 6) % 7; // poniedziałek = 0
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - day);
-  return d.toISOString().slice(0, 10);
-}
-
 function viewHistory() {
   const shifts = shiftsDesc();
   if (!shifts.length) return header('Historia') + '<main><p class="muted">Jeszcze nie ma żadnej zmiany.</p></main>';
@@ -591,35 +593,41 @@ function viewHistory() {
     if (!m) { m = { key, date: d, shifts: [] }; months.push(m); }
     m.shifts.push(s);
   });
-  const fw = rates().fw;
   return header('Historia') + `<main>${months.map((m, i) => {
     const ms = m.shifts.reduce((a, s) => a + (new Date(s.end || Date.now()) - new Date(s.start)), 0);
     const st = rideStats(m.shifts.flatMap((s) => ridesOf(s.id)), ms);
-    const weeks = new Set(m.shifts.map((s) => weekKey(s.start))).size;
-    if (fw) st.payout -= weeks * fw;
     const name = m.date.toLocaleDateString('pl-PL', { month: 'long', year: 'numeric' });
     return `<h2>${esc(name)} · ${plural(m.shifts.length, 'zmiana', 'zmiany', 'zmian')}</h2>
-      ${i === 0 ? statsGrid(st) + (fw ? `<p class="hint">Na rękę uwzględnia stałą opłatę floty za ${plural(weeks, 'tydzień', 'tygodnie', 'tygodni')}.</p>` : '') + '<div style="height:10px"></div>'
-        : `<p class="hint" style="margin-bottom:10px">${fmtMoney(st.earned)} od Ubera · na rękę ~${fmtMoney(st.payout)} · ${fmtDur(ms)}</p>`}
+      ${i === 0 ? statsGrid(st) + '<div style="height:10px"></div>'
+        : `<p class="hint" style="margin-bottom:10px">${fmtMoney(st.earned)} od Ubera${st.pay != null ? ' · dla mnie ' + fmtMoney(st.pay) : ''} · ${fmtDur(ms)}</p>`}
       <div class="list">${m.shifts.map(shiftCard).join('')}</div>`;
   }).join('')}</main>`;
 }
 
 function viewSettings() {
   const s = db.settings;
-  const field = (name, label, hint) => `<label>${label} <span class="opt">${hint}</span>${numInput(name, s[name], '0', 'data-est="settings"')}</label>`;
+  const l = learnedRatio();
+  const mode = (v, label) => `<label><input type="radio" name="payMode" value="${v}" ${s.payMode === v ? 'checked' : ''}><span>${label}</span></label>`;
   return header('Ustawienia') + `<main>
-    <h2>Stawki do szacunków</h2>
+    <h2>Jak płaci mi szef</h2>
     <form class="stack" data-form="settings" novalidate>
-      ${field('commission', 'Prowizja Ubera (%)', 'od ceny przejazdu')}
-      ${field('vatCommission', 'VAT od prowizji (%)', 'źródła podają 23%')}
-      ${field('vatFare', 'VAT od przejazdu (%)', 'potrąca flota, 0 jeśli nie')}
-      ${field('fleetPct', 'Opłata floty (%)', 'od kwoty od Ubera')}
-      ${field('fleetWeekly', 'Opłata floty (zł/tydz.)', 'stała')}
-      <div class="card glass note" data-est-out="settings"></div>
-      <button class="btn accent">Zapisz stawki</button>
+      <fieldset class="seg" style="grid-template-columns:1fr 1fr 1fr">${mode('none', 'Nie liczę')}${mode('pct', '% od Ubera')}${mode('hour', 'Za godzinę')}</fieldset>
+      <label>Wartość <span class="opt">procent albo zł za godzinę w aplikacji</span>${numInput('payValue', s.payValue || null, '0')}</label>
+      <p class="hint" style="margin-top:-6px">Wtedy przy każdej zmianie zobaczysz kwotę „Dla mnie”. Opłaty floty, VAT i resztę rozlicza szef, więc ich tu nie ma.</p>
+      <h2 style="margin-top:12px">Szacunek kwoty z oferty</h2>
+      <div class="card glass note">${l
+        ? `Od Ubera przychodzi średnio <b>${fmtPct(l.ratio)}</b> kwoty z oferty (z ${plural(l.n, 'twojego kursu', 'twoich kursów', 'twoich kursów')}). Tego używam przy nowych ofertach.`
+        : 'Gdy zapiszesz 3 kursy z kwotą z oferty i kwotą od Ubera, szacunek będzie liczony z twoich kursów. Do tego czasu korzystam ze stawek poniżej.'}</div>
+      <details>
+        <summary class="muted" style="padding:8px 0;cursor:pointer">Stawki wstępne</summary>
+        <div class="stack" style="display:flex;flex-direction:column;gap:16px;margin-top:10px">
+          <label>Prowizja Ubera (%) <span class="opt">źródła podają 25%</span>${numInput('commission', s.commission, '25', 'data-est="settings"')}</label>
+          <label>VAT od prowizji (%) <span class="opt">źródła podają 23%</span>${numInput('vatCommission', s.vatCommission, '23', 'data-est="settings"')}</label>
+          <div class="card glass note" data-est-out="settings"></div>
+        </div>
+      </details>
+      <button class="btn accent">Zapisz</button>
     </form>
-    <p class="hint">Uber zmienia prowizję, więc stawki służą tylko do szacunków. Prawdziwy wynik widać, gdy przy kursach wpisujesz kwotę z oferty, kwotę od Ubera i, w miarę możliwości, cenę zapłaconą przez klienta.</p>
     <h2>Dane</h2>
     <div class="tools">
       <button class="btn ghost" data-act="exportRides">Kursy i zmiany → Excel (CSV)</button>
@@ -638,19 +646,17 @@ function updateEstimates() {
   if (offerIn && offerOut) {
     const v = parseNum(offerIn.value);
     offerOut.textContent = v > 0
-      ? `Od Ubera dostaniesz ok. ${fmtMoney(expectedFinalFromOffer(v))}, na rękę ok. ${fmtMoney(payoutFromFinal(expectedFinalFromOffer(v)))}.`
-      : 'Kwota z oferty jest już po prowizji, ale przed VAT od prowizji.';
+      ? `Od Ubera dostaniesz ok. ${fmtMoney(expectedFinalFromOffer(v))} (${estimateSource()}).`
+      : 'Kwota z oferty to jeszcze nie wszystko: Uber potrąca potem VAT od swojej prowizji.';
   }
   const setOut = $app.querySelector('[data-est-out="settings"]');
   if (setOut) {
     const f = $app.querySelector('form[data-form="settings"]');
     const val = (n) => { const x = parseNum(f.elements[n].value); return Number.isFinite(x) ? x / 100 : 0; };
-    const c = val('commission'); const v = val('vatCommission'); const vf = val('vatFare'); const fp = val('fleetPct');
-    const offer = 100 * (1 - c);
+    const c = val('commission'); const v = val('vatCommission');
     const final = 100 * (1 - c - c * v);
-    const pay = final - 100 * vf / (1 + vf) - final * fp;
-    setOut.innerHTML = `Przykład: klient płaci <b>100,00 zł</b> → oferta w aplikacji <b>${nf(offer)} zł</b> → od Ubera <b>${nf(final)} zł</b>
-      (prowizja z VAT ${nf(100 - final)} zł) → na rękę ok. <b>${nf(pay)} zł</b>.`;
+    setOut.innerHTML = `Przykład: klient płaci <b>100,00 zł</b> → oferta w aplikacji <b>${nf(100 * (1 - c))} zł</b> →
+      od Ubera <b>${nf(final)} zł</b> (prowizja z VAT ${nf(100 - final)} zł).`;
   }
 }
 
@@ -884,13 +890,15 @@ const forms = {
   },
 
   settings(f) {
-    const n = numFields(f, { commission: {}, vatCommission: {}, vatFare: {}, fleetPct: {}, fleetWeekly: {} });
+    const n = numFields(f, { payValue: {}, commission: {}, vatCommission: {} });
     if (!n) return;
-    Object.keys(n).forEach((k) => { if (n[k] == null) n[k] = 0; });
+    if (n.commission == null) n.commission = DEFAULTS.commission;
+    if (n.vatCommission == null) n.vatCommission = DEFAULTS.vatCommission;
+    if (n.payValue == null) n.payValue = 0;
     if (n.commission >= 100) { toast('Prowizja musi być mniejsza niż 100%.'); return; }
-    db.settings = { ...db.settings, ...n };
+    db.settings = { ...db.settings, ...n, payMode: f.elements.payMode.value || 'none' };
     save();
-    toast('Stawki zapisane');
+    toast('Zapisano');
     route();
   },
 };
