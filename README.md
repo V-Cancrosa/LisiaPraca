@@ -11,6 +11,8 @@ Aplikacja na telefon (PWA) dla kierowcy jeżdżącego dla Ubera we flocie.
   1. **Oferta:** przybliżone skąd i dokąd, kwota z oferty, szacowany czas dojazdu i przejazdu. Przycisk „Przyjmuję”.
   2. **Jestem na miejscu** → 3. **Klient wsiadł** → 4. **Koniec kursu:** kwota od Ubera, opcjonalnie cena zapłacona przez klienta, napiwek i dokładne adresy.
   - Kurs anulowany, z opcjonalną opłatą za anulowanie.
+- **Kafelek i pływający przycisk Androida:** w Ustawieniach można wywołać systemowe dodanie kafelka „Nowy kurs” albo włączyć przesuwalny przycisk nad Uberem. Oba robią zrzut oferty i rozpoznają na telefonie kwotę, miejsca odbioru i celu oraz czasy. Dane są pokazane do sprawdzenia przed zapisaniem kursu. Pływający przycisk wymaga zgody Androida na wyświetlanie nad innymi aplikacjami.
+- **Adresy GPS:** po „Klient wsiadł” i przy kończeniu kursu Android próbuje uzupełnić adres odbioru i celu. Wymaga zgody na lokalizację i dostępności geokodera; gdy adresu nie da się ustalić, pozostaje wpisany adres.
 - **Rozliczenie:** dla każdego kursu zapisuję osobno kwotę z oferty i kwotę od Ubera, więc widać, ile Uber faktycznie potrącił, nawet gdy zmienia prowizję. Po 3 takich kursach szacunek dla nowych ofert liczy się z twoich danych.
 - **Brutto kursu:** w szczegółach kursu aplikacja pokazuje wpisaną kwotę klienta albo szacuje ją z kwoty od Ubera/oferty. To przybliżenie, bo prowizja różni się między kursami.
 - **Prowizja tygodniowa:** prowizja może się różnić między kursami, ale cel z VAT wynosi 30,75% tygodniowych płatności klientów. W Historii aplikacja porównuje wpisane kwoty z tym celem i pokazuje szacowaną nadwyżkę do zwrotu w następnym tygodniu.
@@ -57,4 +59,4 @@ Styl oparty na efektach z mojej kolekcji [CodePen_Things](https://github.com/V-C
 
 ## Aktualizacja
 
-To czysty HTML, CSS i JS, bez budowania. Po zmianach podbij numer `CACHE` w `sw.js`.
+Po pushu na `master` GitHub Pages publikuje stronę automatycznie; numer `CACHE` w `sw.js` trzeba podbić przy zmianach PWA. Zmiany Androida uruchamiają workflow budujący APK i wydanie, które należy zainstalować na telefonie.

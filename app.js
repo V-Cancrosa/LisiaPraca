@@ -18,7 +18,7 @@ const WEEKLY_COMMISSION_TARGET = 0.3075;
 let db = load();
 
 function emptyDb() {
-  return { version: 3, shifts: [], rides: [], fuels: [], settings: { ...DEFAULTS } };
+  return { version: 3, shifts: [], rides: [], fuels: [], pendingOffers: [], settings: { ...DEFAULTS } };
 }
 
 // Przenosi dane ze starszych wersji aplikacji do obecnego układu.
@@ -26,6 +26,7 @@ function migrate(d) {
   if (!d || !Array.isArray(d.shifts)) return emptyDb();
   d.rides = d.rides || [];
   d.fuels = d.fuels || [];
+  d.pendingOffers = Array.isArray(d.pendingOffers) ? d.pendingOffers : [];
   if (!d.version || d.version < 2) {
     d.rides = d.rides.map((r) => ({
       id: r.id, shiftId: r.shiftId, from: r.from || '', to: r.to || '',
@@ -118,6 +119,61 @@ function toast(msg) {
   setTimeout(() => t.remove(), 2200);
 }
 
+const nativeRequests = new Map();
+let nativeRequestId = 0;
+let nativeOffersSyncing = false;
+let nativeOffersSyncRequested = false;
+
+function nativeCall(cmd, args = {}) {
+  const bridge = window.LisiaNative;
+  if (!bridge || typeof bridge.postMessage !== 'function') return Promise.resolve(null);
+  const id = ++nativeRequestId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      nativeRequests.delete(id);
+      reject(new Error('Brak odpowiedzi aplikacji Android.'));
+    }, cmd === 'startCapture' || cmd === 'toggleFloating' ? 120000 : 15000);
+    nativeRequests.set(id, { resolve, reject, timer });
+    try {
+      bridge.postMessage(JSON.stringify({ id, cmd, args }));
+    } catch (error) {
+      clearTimeout(timer);
+      nativeRequests.delete(id);
+      reject(error);
+    }
+  });
+}
+
+async function nativeAddress() {
+  const result = await nativeCall('currentAddress');
+  if (!result || !result.ok || !result.label) {
+    throw new Error(result && result.reason ? result.reason : 'Adres nie jest dostępny.');
+  }
+  return result.label;
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window.LisiaNative || typeof event.data !== 'string') return;
+  let message;
+  try { message = JSON.parse(event.data); } catch (error) {
+    console.error('Niepoprawna wiadomość z aplikacji Android:', error);
+    return;
+  }
+  if (Number.isInteger(message.id)) {
+    const request = nativeRequests.get(message.id);
+    if (request) {
+      clearTimeout(request.timer);
+      nativeRequests.delete(message.id);
+      request.resolve(message.result);
+    }
+  }
+  if (message.event === 'needCapture') {
+    const request = activeShift() ? nativeCall('startCapture') : actions.startShift();
+    request.catch((error) => toast('Nie udało się uruchomić przechwytywania: ' + error.message));
+  }
+  if (message.event === 'offer' || message.event === 'sync') syncNativeOffers();
+});
+
 // Okno z pytaniem zamiast systemowego confirm().
 function ask(msg, okLabel = 'Tak', { danger = false, cancelLabel = 'Anuluj' } = {}) {
   return new Promise((resolve) => {
@@ -182,6 +238,89 @@ function estimateCustomerGross(r, riderPaid, final, offer) {
     return { amount: offer / (1 - c), source: 'offer' };
   }
   return null;
+}
+
+function parseOfferOcr(offer) {
+  const lines = (offer.lines || [])
+    .map((line) => ({ text: String(line.t || '').trim(), y: Number(line.y) || 0, x: Number(line.x) || 0 }))
+    .filter((line) => line.text)
+    .sort((a, b) => a.y - b.y || a.x - b.x)
+    .map((line) => line.text);
+  const text = String(offer.text || lines.join('\n'));
+  const pickupIndex = lines.findIndex((line) => /do\s+miejsca\s+odbioru/i.test(line));
+  const tripIndex = lines.findIndex((line) => /\bprzejazd\b/i.test(line) && !/do\s+miejsca\s+odbioru/i.test(line));
+  const addressAfter = (index) => {
+    if (index < 0) return '';
+    for (const line of lines.slice(index + 1, index + 5)) {
+      if (/^(?:ulica|ul\.|aleja|al\.|plac|pl\.|osiedle|os\.|rondo)\b/i.test(line) ||
+        (/\d[\w/-]*(?:,\s*|\s+[A-ZĄĆĘŁŃÓŚŹŻ])/u.test(line) && !/\b(?:min|km|przejazd|odbioru)\b/i.test(line))) return line;
+    }
+    return '';
+  };
+  const fareMatch = text.match(/(\d+(?:[ .]\d{3})*(?:[,.]\d{1,2})?)\s*(?:zł|pln)/i);
+  const amountText = fareMatch ? fareMatch[1].replace(/\s/g, '') : '';
+  const amount = amountText
+    ? Number(amountText.includes(',') ? amountText.replace(/\./g, '').replace(',', '.') : amountText)
+    : null;
+  const eta = (index) => {
+    if (index < 0) return null;
+    const match = lines[index].match(/\b(\d+)\s*min\b/i);
+    return match ? Number(match[1]) : null;
+  };
+  return {
+    id: offer.id,
+    ts: offer.ts,
+    text,
+    img: offer.img || '',
+    fields: {
+      offer: Number.isFinite(amount) ? amount : null,
+      from: addressAfter(pickupIndex),
+      to: addressAfter(tripIndex),
+      etaPickup: eta(pickupIndex),
+      etaTrip: eta(tripIndex),
+    },
+  };
+}
+
+async function syncNativeOffers() {
+  if (!window.LisiaNative) return;
+  if (nativeOffersSyncing) { nativeOffersSyncRequested = true; return; }
+  nativeOffersSyncing = true;
+  try {
+    const data = await nativeCall('take');
+    if (!data) return;
+    let changed = false;
+    (data.offers || []).forEach((offer) => {
+      if (!offer.id || db.pendingOffers.some((pending) => pending.id === offer.id)) return;
+      db.pendingOffers.push(parseOfferOcr(offer));
+      changed = true;
+    });
+    (data.events || []).forEach((event) => {
+      if (event.type !== 'arrived') return;
+      const ride = db.rides.find((item) => item.id === event.rideId);
+      if (ride && !ride.atPickup) {
+        ride.atPickup = new Date(event.ts).toISOString();
+        changed = true;
+      }
+    });
+    if (changed) {
+      save();
+      if (data.offers && data.offers.length) {
+        toast('Odczytano ofertę z kafelka. Sprawdź dane przed przyjęciem.');
+        tab('#/oferta');
+      } else {
+        route();
+      }
+    }
+  } catch (error) {
+    toast('Nie udało się pobrać danych z kafelka: ' + error.message);
+  } finally {
+    nativeOffersSyncing = false;
+    if (nativeOffersSyncRequested) {
+      nativeOffersSyncRequested = false;
+      syncNativeOffers();
+    }
+  }
 }
 
 function estimateSource() {
@@ -388,6 +527,7 @@ function route() {
   const [page, id] = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const views = {
     kurs: () => (id ? viewRideEdit(id) : viewOffer()),
+    oferta: viewOffer,
     koniec: () => viewFinish(id, false),
     anulowany: () => viewFinish(id, true),
     tankowanie: () => viewFuel(id),
@@ -488,6 +628,7 @@ function viewHome() {
     return header('Lisia Praca') + `<main>
       <div class="glow go" style="border-radius:var(--radius)"><button class="big go" data-act="startShift">Włączam aplikację</button></div>
       <p class="hint center">Naciśnij, gdy włączasz aplikację Ubera.</p>
+      ${db.pendingOffers.length ? `<button class="btn ghost" data-go="#/oferta">Sprawdź odczytaną ofertę (${db.pendingOffers.length})</button>` : ''}
       ${last ? '<h2>Ostatnia zmiana</h2>' + statsGrid(shiftStats(last)) + '<div style="margin-top:10px">' + shiftCard(last) + '</div>' : ''}
     </main>`;
   }
@@ -524,6 +665,7 @@ function viewHome() {
     <button class="big stop" data-act="endShift">Wyłączam aplikację</button>
     <p class="since">Aplikacja włączona od <strong>${fmtTime(s.start)}</strong> · ${fmtDur(st.ms)}</p>
     ${live || `<div class="glow info" style="border-radius:var(--radius);margin-top:18px"><button class="big info" data-go="#/kurs">+ Nowy kurs</button></div>`}
+    ${db.pendingOffers.length ? `<button class="btn ghost" data-go="#/oferta">Sprawdź odczytaną ofertę (${db.pendingOffers.length})</button>` : ''}
     ${statsGrid(st)}
     <h2>Kursy na tej zmianie</h2>
     ${rides.length ? `<div class="list">${rides.map(rideItem).join('')}</div>` : '<p class="muted">Jeszcze nie ma kursów.</p>'}
@@ -531,20 +673,44 @@ function viewHome() {
 }
 
 function viewOffer() {
-  if (!activeShift()) return null;
+  const pending = db.pendingOffers[0] || null;
+  const shift = activeShift();
   const r = activeRide();
-  if (r) return viewRideEdit(r.id);
+  if (!shift && !pending) return null;
+  if (r && !pending) return viewRideEdit(r.id);
+  if (r && pending) {
+    return header('Odczytana oferta', true) + `<main>
+      <p class="note">Oferta z kafelka czeka na sprawdzenie. Najpierw zakończ bieżący kurs; odczyt nie zniknie.</p>
+      <button class="btn ghost" data-go="#/">Wróć do bieżącego kursu</button>
+    </main>`;
+  }
+  if (!shift) {
+    return header('Odczytana oferta', true) + `<main>
+      <p class="note">Włącz zmianę, aby sprawdzić ofertę i zapisać kurs.</p>
+      <button class="big go" data-act="startShift">Włączam aplikację</button>
+      <button class="btn danger" data-act="rejectOffer" data-id="${esc(pending.id)}">Odrzuciłam / odrzucono ofertę</button>
+    </main>`;
+  }
+  const fields = pending ? pending.fields : {};
+  const image = pending && /^[a-z0-9]+\.jpg$/.test(pending.img)
+    ? `<img src="__native/offer/${encodeURIComponent(pending.img)}" alt="Zrzut oferty" style="display:block;width:100%;height:auto;border-radius:var(--radius);margin-top:12px">`
+    : '';
   return header('Oferta kursu', true) + `<main>
-    <form class="stack" data-form="offer" novalidate>
-      <label>Skąd <span class="opt">w przybliżeniu, jak w ofercie</span><input name="from" list="places" autocomplete="off" data-autofocus></label>
-      <label>Dokąd<input name="to" list="places" autocomplete="off"></label>
-      <label>Kwota z oferty (zł)${numInput('offer', null, '0,00', 'data-est="offer"')}</label>
+    <form class="stack" data-form="offer" data-offer-id="${pending ? esc(pending.id) : ''}" novalidate>
+      ${pending ? `<div class="card glass note">Sprawdź dane odczytane z kafelka. Przed zapisaniem możesz je poprawić.${image}
+        <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Tekst rozpoznany ze zrzutu</summary><pre style="white-space:pre-wrap">${esc(pending.text || 'Nie rozpoznano tekstu.')}</pre></details>
+      </div>` : ''}
+      <label>Skąd <span class="opt">w przybliżeniu, jak w ofercie</span><input name="from" list="places" autocomplete="off" value="${esc(fields.from || '')}" data-autofocus></label>
+      <label>Dokąd<input name="to" list="places" autocomplete="off" value="${esc(fields.to || '')}"></label>
+      <label>Kwota z oferty (zł)${numInput('offer', fields.offer, '0,00', 'data-est="offer" data-est-gross="1"')}</label>
       <p class="hint" data-est-out="offer"></p>
+      <p class="hint" data-est-out="gross"></p>
       <div class="grid2">
-        <label>Dojazd do klienta <span class="opt">min</span>${numInput('etaPickup', null, '0')}</label>
-        <label>Przejazd <span class="opt">min</span>${numInput('etaTrip', null, '0')}</label>
+        <label>Dojazd do klienta <span class="opt">min</span>${numInput('etaPickup', fields.etaPickup, '0')}</label>
+        <label>Przejazd <span class="opt">min</span>${numInput('etaTrip', fields.etaTrip, '0')}</label>
       </div>
       <div class="glow go" style="border-radius:var(--radius)"><button class="big go">Przyjmuję</button></div>
+      ${pending ? `<button type="button" class="btn danger" data-act="rejectOffer" data-id="${esc(pending.id)}">Odrzuciłam / odrzucono ofertę</button>` : ''}
     </form>
     ${placesList()}
   </main>`;
@@ -750,6 +916,12 @@ function viewSettings() {
       <label class="btn ghost file-btn">Przywróć z kopii<input type="file" accept="application/json,.json" data-act="importJson"></label>
     </div>
     <p class="hint">Dane są zapisane tylko na tym telefonie. Rób kopię zapasową co jakiś czas, np. raz w tygodniu.</p>
+    <h2>Automatyzacja Androida</h2>
+    <p class="hint">Kafelek lub pływający przycisk robi zrzut aktualnej oferty. Pływający przycisk wymaga zgody Androida na wyświetlanie nad innymi aplikacjami.</p>
+    <div class="tools">
+      <button class="btn ghost" data-act="addTile">Dodaj kafelek „Nowy kurs”</button>
+      <button class="btn ghost" data-act="toggleFloating">Włącz / wyłącz pływający przycisk</button>
+    </div>
     <h2>Kasowanie danych</h2>
     <p class="hint">Pojedynczy kurs lub tankowanie usuniesz w jego szczegółach. Możesz też wyczyścić całą wybraną kategorię.</p>
     <div class="tools">
@@ -780,9 +952,11 @@ function updateEstimates() {
       od Ubera <b>${nf(final)} zł</b> (prowizja z VAT ${nf(100 - final)} zł).`;
   }
   const grossOut = $app.querySelector('[data-est-out="gross"]');
-  const grossForm = $app.querySelector('form[data-form="finish"], form[data-form="rideEdit"]');
+  const grossForm = $app.querySelector('form[data-form="offer"], form[data-form="finish"], form[data-form="rideEdit"]');
   if (grossOut && grossForm) {
-    const r = db.rides.find((ride) => ride.id === grossForm.dataset.id);
+    const r = grossForm.dataset.form === 'offer'
+      ? { cancelled: false }
+      : db.rides.find((ride) => ride.id === grossForm.dataset.id);
     if (!r) return;
     const input = (name, fallback) => grossForm.elements[name]
       ? parseNum(grossForm.elements[name].value)
@@ -813,10 +987,48 @@ function updateEstimates() {
 const actions = {
   back: () => done(),
 
-  startShift() {
+  async addTile() {
+    if (!window.LisiaNative) { toast('Dodawanie kafelka jest dostępne w aplikacji Android.'); return; }
+    try {
+      const result = await nativeCall('addTile');
+      if (result && result.ok) {
+        toast(result.result === 1 ? 'Kafelek „Nowy kurs” jest już dodany.' : 'Potwierdź dodanie kafelka w oknie Androida.');
+      } else {
+        toast('Android nie dodał kafelka. Spróbuj ponownie w szybkich ustawieniach.');
+      }
+    } catch (error) {
+      toast('Nie udało się dodać kafelka: ' + error.message);
+    }
+  },
+
+  async toggleFloating() {
+    if (!window.LisiaNative) { toast('Pływający przycisk jest dostępny w aplikacji Android.'); return; }
+    try {
+      const result = await nativeCall('toggleFloating');
+      if (result && result.permissionDenied) {
+        toast('Zezwól aplikacji na wyświetlanie nad innymi aplikacjami i spróbuj ponownie.');
+      } else if (result && result.ok && result.enabled) {
+        toast('Pływający przycisk będzie widoczny podczas zmiany.');
+      } else if (result && result.ok) {
+        toast('Pływający przycisk wyłączony.');
+      } else {
+        toast('Nie udało się zmienić ustawienia pływającego przycisku.');
+      }
+    } catch (error) {
+      toast('Nie udało się zmienić ustawienia: ' + error.message);
+    }
+  },
+
+  async startShift() {
     if (!activeShift()) db.shifts.push({ id: uid(), start: nowIso(), end: null });
     save();
     route();
+    try {
+      const status = await nativeCall('startCapture');
+      if (status && !status.capturing) toast('Nie włączono zrzutów ekranu; sprawdź zgodę na przechwytywanie.');
+    } catch (error) {
+      toast('Nie udało się uruchomić funkcji telefonu: ' + error.message);
+    }
   },
 
   async endShift() {
@@ -830,6 +1042,9 @@ const actions = {
     s.end = t;
     save();
     route();
+    try { await nativeCall('stopShift'); } catch (error) {
+      toast('Nie udało się zatrzymać usługi telefonu: ' + error.message);
+    }
   },
 
   atPickup() {
@@ -838,10 +1053,28 @@ const actions = {
     route();
   },
 
-  tripStart() {
+  async tripStart() {
     const r = activeRide();
     if (r && !r.tripStart) { r.tripStart = nowIso(); if (!r.atPickup) r.atPickup = r.tripStart; save(); }
     route();
+    if (!r || !window.LisiaNative) return;
+    try {
+      const address = await nativeAddress();
+      if (address) {
+        r.from = address;
+        save();
+        route();
+        toast('Zapisano adres odbioru z GPS');
+      }
+    } catch (error) {
+      toast('Nie udało się odczytać adresu GPS: ' + error.message);
+    }
+  },
+
+  rejectOffer(el) {
+    db.pendingOffers = db.pendingOffers.filter((offer) => offer.id !== el.dataset.id);
+    save();
+    tab(db.pendingOffers.length ? '#/oferta' : '#/');
   },
 
   async deleteRide(el) {
@@ -868,16 +1101,17 @@ const actions = {
   },
 
   async clearRideData() {
-    if (!db.rides.length) { toast('Nie ma kursów do usunięcia.'); return; }
-    if (!(await ask(`Usunąć wszystkie ${plural(db.rides.length, 'kurs', 'kursy', 'kursów')}, także otwarte? Zmiany i tankowania zostaną zachowane.`, 'Usuń wszystko', { danger: true }))) return;
+    if (!db.rides.length && !db.pendingOffers.length) { toast('Nie ma kursów do usunięcia.'); return; }
+    if (!(await ask(`Usunąć wszystkie ${plural(db.rides.length, 'kurs', 'kursy', 'kursów')} i ${plural(db.pendingOffers.length, 'odczytaną ofertę', 'odczytane oferty', 'odczytanych ofert')}, także otwarte? Zmiany i tankowania zostaną zachowane.`, 'Usuń wszystko', { danger: true }))) return;
     db.rides = [];
+    db.pendingOffers = [];
     save();
     toast('Usunięto wszystkie kursy');
     route();
   },
 
   async resetData() {
-    const summary = `${plural(db.shifts.length, 'zmianę', 'zmiany', 'zmian')}, ${plural(db.rides.length, 'kurs', 'kursy', 'kursów')}, ${plural(db.fuels.length, 'tankowanie', 'tankowania', 'tankowań')} oraz ustawienia`;
+    const summary = `${plural(db.shifts.length, 'zmianę', 'zmiany', 'zmian')}, ${plural(db.rides.length, 'kurs', 'kursy', 'kursów')}, ${plural(db.pendingOffers.length, 'odczytaną ofertę', 'odczytane oferty', 'odczytanych ofert')}, ${plural(db.fuels.length, 'tankowanie', 'tankowania', 'tankowań')} oraz ustawienia`;
     if (!(await ask(`Zresetować całą aplikację? Zostaną usunięte ${summary}. Tej operacji nie da się cofnąć.`, 'Zresetuj', { danger: true }))) return;
     db = emptyDb();
     save();
@@ -981,31 +1215,50 @@ const forms = {
   offer(f) {
     const shift = activeShift();
     if (!shift) return done();
+    if (activeRide()) { toast('Najpierw zakończ bieżący kurs.'); return; }
     const n = numFields(f, { offer: {}, etaPickup: { int: true }, etaTrip: { int: true } });
     if (!n) return;
-    db.rides.push({
+    const ride = {
       id: uid(), shiftId: shift.id, from: f.elements.from.value.trim(), to: f.elements.to.value.trim(),
       offer: n.offer, etaPickup: n.etaPickup, etaTrip: n.etaTrip,
       accepted: nowIso(), atPickup: null, tripStart: null, end: null,
       final: null, riderPaid: null, tip: null, cancelled: false,
-    });
+    };
+    db.rides.push(ride);
+    if (f.dataset.offerId) db.pendingOffers = db.pendingOffers.filter((offer) => offer.id !== f.dataset.offerId);
     save();
-    done();
+    if (window.LisiaNative && ride.from) {
+      nativeCall('watchPickup', { rideId: ride.id, query: ride.from }).then((result) => {
+        if (result && !result.ok) toast('Nie udało się ustawić przypomnienia o dojeździe do klienta.');
+      }).catch((error) => toast('Nie udało się uruchomić GPS: ' + error.message));
+    }
+    if (db.pendingOffers.length) tab('#/oferta');
+    else done();
   },
 
-  finish(f) {
+  async finish(f) {
     const r = db.rides.find((x) => x.id === f.dataset.id);
     if (!r) return done();
     const cancel = f.dataset.cancel === '1';
     const n = numFields(f, cancel ? { final: {} } : { final: { required: true }, riderPaid: {}, tip: {} });
     if (!n) return;
+    let gpsAddress = null;
+    let gpsFailed = false;
+    if (!cancel && window.LisiaNative) {
+      try { gpsAddress = await nativeAddress(); } catch (error) {
+        gpsFailed = true;
+        console.error('Nie udało się odczytać adresu końcowego z GPS:', error);
+      }
+    }
     Object.assign(r, n, { end: r.end || nowIso(), cancelled: cancel });
     if (!cancel) {
       r.from = f.elements.from.value.trim();
-      r.to = f.elements.to.value.trim();
+      r.to = gpsAddress || f.elements.to.value.trim();
     }
     save();
-    toast(cancel ? 'Zapisano anulowany kurs' : 'Kurs zapisany');
+    toast(cancel ? 'Zapisano anulowany kurs' : gpsFailed
+      ? 'Kurs zapisany; nie udało się odczytać adresu GPS.'
+      : gpsAddress ? 'Kurs zapisany z adresem końcowym GPS' : 'Kurs zapisany');
     done();
   },
 
@@ -1135,6 +1388,8 @@ setInterval(() => {
 save(); // zapisz dane po ewentualnej migracji
 history.replaceState({ i: 0 }, '', location.hash || '#/');
 route();
+
+if (window.LisiaNative) syncNativeOffers();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

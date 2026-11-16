@@ -3,8 +3,11 @@ package pl.vcancrosa.lisiapraca
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.StatusBarManager
 import android.content.Intent
+import android.content.ComponentName
 import android.content.pm.PackageManager
+import android.graphics.drawable.Icon
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -12,6 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -40,11 +44,13 @@ class MainActivity : Activity() {
         private const val REQ_CAPTURE = 10
         private const val REQ_PERMS = 11
         private const val REQ_FILE = 12
+        private const val REQ_OVERLAY = 13
     }
 
     private lateinit var web: WebView
     private var proxy: JavaScriptReplyProxy? = null
     private var pendingCaptureId: Int? = null
+    private var pendingFloatingId: Int? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val main = Handler(Looper.getMainLooper())
 
@@ -123,6 +129,11 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    override fun onResume() {
+        super.onResume()
+        completeFloatingRequest()
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (web.canGoBack()) web.goBack() else super.onBackPressed()
@@ -171,13 +182,23 @@ class MainActivity : Activity() {
         when (m.optString("cmd")) {
             "hello" -> reply(id, status())
             "startCapture" -> {
-                pendingCaptureId = id
-                ensurePermissionsThenConsent()
+                if (ShiftService.isCapturing()) reply(id, status())
+                else {
+                    pendingCaptureId = id
+                    ensurePermissionsThenConsent()
+                }
             }
             "stopShift" -> {
                 stopService(Intent(this, ShiftService::class.java))
                 main.postDelayed({ reply(id, status()) }, 300)
             }
+            "currentAddress" -> {
+                val service = ShiftService.instance
+                if (service == null) reply(id, JSONObject().put("ok", false).put("reason", "no-service"))
+                else service.currentAddress { reply(id, it) }
+            }
+            "addTile" -> addTile(id)
+            "toggleFloating" -> toggleFloating(id)
             "take" -> reply(
                 id,
                 JSONObject().put("offers", OfferStore.takeOffers(this)).put("events", OfferStore.takeEvents(this))
@@ -194,6 +215,74 @@ class MainActivity : Activity() {
             "shareFile" -> reply(id, share(args))
             else -> reply(id, JSONObject.NULL)
         }
+    }
+
+    private fun addTile(id: Int) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            reply(id, JSONObject().put("ok", false).put("reason", "unsupported"))
+            return
+        }
+        val manager = getSystemService(StatusBarManager::class.java)
+        if (manager == null) {
+            reply(id, JSONObject().put("ok", false).put("reason", "no-status-bar-service"))
+            return
+        }
+        manager.requestAddTileService(
+            ComponentName(this, OfferTileService::class.java),
+            "Nowy kurs",
+            Icon.createWithResource(this, R.drawable.ic_tile),
+            mainExecutor
+        ) { result ->
+            val ok = result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ||
+                result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED
+            reply(id, JSONObject().put("ok", ok).put("result", result))
+        }
+    }
+
+    private fun toggleFloating(id: Int) {
+        val preferences = getSharedPreferences(ShiftService.FLOATING_PREFS, MODE_PRIVATE)
+        val enabled = preferences.getBoolean(ShiftService.FLOATING_ENABLED, false)
+        if (enabled && Settings.canDrawOverlays(this)) {
+            preferences.edit().putBoolean(ShiftService.FLOATING_ENABLED, false).apply()
+            val removed = ShiftService.instance?.setFloatingEnabled(false) ?: true
+            reply(id, JSONObject().put("ok", removed).put("enabled", false))
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            pendingFloatingId = id
+            try {
+                startActivityForResult(
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")),
+                    REQ_OVERLAY
+                )
+            } catch (e: Exception) {
+                pendingFloatingId = null
+                reply(id, JSONObject().put("ok", false).put("reason", e.message ?: "settings-unavailable"))
+            }
+            return
+        }
+        enableFloating(id)
+    }
+
+    private fun completeFloatingRequest() {
+        val id = pendingFloatingId ?: return
+        pendingFloatingId = null
+        if (!Settings.canDrawOverlays(this)) {
+            reply(id, JSONObject().put("ok", false).put("permissionDenied", true))
+        } else {
+            enableFloating(id)
+        }
+    }
+
+    private fun enableFloating(id: Int) {
+        getSharedPreferences(ShiftService.FLOATING_PREFS, MODE_PRIVATE)
+            .edit().putBoolean(ShiftService.FLOATING_ENABLED, true).apply()
+        val shown = ShiftService.instance?.setFloatingEnabled(true) ?: true
+        if (!shown) {
+            getSharedPreferences(ShiftService.FLOATING_PREFS, MODE_PRIVATE)
+                .edit().putBoolean(ShiftService.FLOATING_ENABLED, false).apply()
+        }
+        reply(id, JSONObject().put("ok", shown).put("enabled", shown))
     }
 
     private fun ensurePermissionsThenConsent() {
@@ -239,6 +328,7 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         when (requestCode) {
+            REQ_OVERLAY -> completeFloatingRequest()
             REQ_CAPTURE -> {
                 if (resultCode == RESULT_OK && data != null) startShiftService(data, resultCode)
                 else startShiftService(null, 0) // bez zrzutów, ale GPS dalej działa

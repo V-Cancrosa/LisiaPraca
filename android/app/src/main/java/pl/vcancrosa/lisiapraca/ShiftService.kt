@@ -7,7 +7,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.location.Geocoder
@@ -21,13 +23,21 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
+import android.widget.TextView
+import android.widget.Toast
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import org.json.JSONObject
 import java.util.Locale
 
@@ -43,6 +53,8 @@ class ShiftService : Service() {
         var instance: ShiftService? = null
         fun isCapturing() = instance?.projection != null
         private const val ARRIVAL_METERS = 150f
+        const val FLOATING_PREFS = "lisia_settings"
+        const val FLOATING_ENABLED = "floating_enabled"
     }
 
     @Volatile
@@ -62,6 +74,8 @@ class ShiftService : Service() {
     private var target: Location? = null
     private var targetRide: String? = null
     private var arrivedSent = false
+    private var floatingView: TextView? = null
+    private var floatingManager: WindowManager? = null
     private val main = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -79,7 +93,9 @@ class ShiftService : Service() {
             @Suppress("DEPRECATION") intent?.getParcelableExtra("data")
         }
         val code = intent?.getIntExtra("code", 0) ?: 0
-        val hasLocation = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasLocation =
+            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+              checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         var type = 0
         if (data != null || projection != null) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
@@ -97,11 +113,13 @@ class ShiftService : Service() {
 
         if (data != null) startProjection(code, data)
         if (hasLocation) startLocation()
+        syncFloatingView()
         OfferTileService.refresh(this)
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        removeFloatingView()
         stopProjection()
         locationCallback?.let { fused?.removeLocationUpdates(it) }
         locationCallback = null
@@ -203,10 +221,178 @@ class ShiftService : Service() {
             }
         }
         locationCallback = cb
-        val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000L)
+        val priority = if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            Priority.PRIORITY_HIGH_ACCURACY
+        } else {
+            Priority.PRIORITY_BALANCED_POWER_ACCURACY
+        }
+        val req = LocationRequest.Builder(priority, 5000L)
             .setMinUpdateIntervalMillis(3000L)
             .build()
         client.requestLocationUpdates(req, cb, Looper.getMainLooper())
+    }
+
+    fun setFloatingEnabled(enabled: Boolean): Boolean {
+        if (!enabled) {
+            removeFloatingView()
+            return true
+        }
+        if (!Settings.canDrawOverlays(this)) return false
+        return showFloatingView()
+    }
+
+    fun resumeFloatingCapture() {
+        floatingView?.visibility = View.VISIBLE
+    }
+
+    fun pauseFloatingCapture() {
+        floatingView?.visibility = View.INVISIBLE
+    }
+
+    private fun syncFloatingView() {
+        val enabled = getSharedPreferences(FLOATING_PREFS, MODE_PRIVATE)
+            .getBoolean(FLOATING_ENABLED, false)
+        setFloatingEnabled(enabled)
+    }
+
+    private fun showFloatingView(): Boolean {
+        floatingView?.let {
+            it.visibility = View.VISIBLE
+            return true
+        }
+        val manager = getSystemService(WINDOW_SERVICE) as WindowManager
+        val density = resources.displayMetrics.density
+        val size = (56 * density).toInt()
+        val params = WindowManager.LayoutParams(
+            size,
+            size,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (resources.displayMetrics.widthPixels - size - (12 * density).toInt()).coerceAtLeast(0)
+            y = (resources.displayMetrics.heightPixels - size) / 2
+        }
+        val bubble = TextView(this).apply {
+            text = "📷"
+            textSize = 25f
+            gravity = Gravity.CENTER
+            contentDescription = "Zrób zrzut oferty"
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.rgb(255, 140, 66))
+                setStroke((2 * density).toInt(), Color.WHITE)
+            }
+            elevation = 8 * density
+            setOnClickListener {
+                visibility = View.INVISIBLE
+                try {
+                    startActivity(
+                        Intent(this@ShiftService, CaptureActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (e: android.content.ActivityNotFoundException) {
+                    visibility = View.VISIBLE
+                    Toast.makeText(this@ShiftService, "Nie udało się otworzyć zrzutu", Toast.LENGTH_SHORT).show()
+                } catch (e: SecurityException) {
+                    visibility = View.VISIBLE
+                    Toast.makeText(this@ShiftService, "Brak zgody na zrzut ekranu", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        var startX = 0
+        var startY = 0
+        var touchX = 0f
+        var touchY = 0f
+        var dragged = false
+        bubble.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = params.x
+                    startY = params.y
+                    touchX = event.rawX
+                    touchY = event.rawY
+                    dragged = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - touchX).toInt()
+                    val dy = (event.rawY - touchY).toInt()
+                    if (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop) dragged = true
+                    if (dragged) {
+                        params.x = (startX + dx).coerceIn(0, resources.displayMetrics.widthPixels - size)
+                        params.y = (startY + dy).coerceIn(0, resources.displayMetrics.heightPixels - size)
+                        manager.updateViewLayout(view, params)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!dragged) view.performClick()
+                    true
+                }
+                else -> false
+            }
+        }
+        return try {
+            manager.addView(bubble, params)
+            floatingView = bubble
+            floatingManager = manager
+            true
+        } catch (e: SecurityException) {
+            false
+        }
+    }
+
+    private fun removeFloatingView() {
+        val view = floatingView ?: return
+        if (view.isAttachedToWindow) floatingManager?.removeViewImmediate(view)
+        floatingView = null
+        floatingManager = null
+    }
+
+    @SuppressLint("MissingPermission")
+    fun currentAddress(callback: (JSONObject) -> Unit) {
+        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!fine && !coarse) {
+            callback(JSONObject().put("ok", false).put("reason", "location-permission-denied"))
+            return
+        }
+        val priority = if (fine) Priority.PRIORITY_HIGH_ACCURACY else Priority.PRIORITY_BALANCED_POWER_ACCURACY
+        val client = fused ?: LocationServices.getFusedLocationProviderClient(this)
+        client.getCurrentLocation(priority, CancellationTokenSource().token)
+            .addOnSuccessListener { location ->
+                if (location == null) {
+                    callback(JSONObject().put("ok", false).put("reason", "location-unavailable"))
+                    return@addOnSuccessListener
+                }
+                lastLocation = location
+                Thread {
+                    val result = JSONObject().put("ok", false)
+                    try {
+                        if (!Geocoder.isPresent()) throw IllegalStateException("geocoder-unavailable")
+                        val geocoder = Geocoder(this, Locale.forLanguageTag("pl-PL"))
+                        @Suppress("DEPRECATION")
+                        val address = geocoder.getFromLocation(location.latitude, location.longitude, 1)?.firstOrNull()
+                        val label = address?.getAddressLine(0)?.trim().orEmpty()
+                        if (label.isBlank()) throw IllegalStateException("address-not-found")
+                        result.put("ok", true)
+                            .put("label", label)
+                            .put("lat", location.latitude)
+                            .put("lng", location.longitude)
+                            .put("accuracy", location.accuracy)
+                    } catch (e: Exception) {
+                        result.put("reason", e.message ?: "geocoding-failed")
+                    }
+                    main.post { callback(result) }
+                }.start()
+            }
+            .addOnFailureListener { error ->
+                callback(JSONObject().put("ok", false).put("reason", error.message ?: "location-failed"))
+            }
     }
 
     private fun checkArrival(l: Location) {

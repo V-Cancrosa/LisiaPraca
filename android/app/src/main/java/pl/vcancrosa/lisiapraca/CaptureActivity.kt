@@ -15,12 +15,14 @@ class CaptureActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ShiftService.instance?.pauseFloatingCapture()
         Handler(Looper.getMainLooper()).postDelayed({ grab() }, 550)
     }
 
     private fun grab() {
         val svc = ShiftService.instance
         val bitmap = svc?.capture()
+        svc?.resumeFloatingCapture()
         if (bitmap == null) {
             if (!ShiftService.isCapturing()) {
                 startActivity(
