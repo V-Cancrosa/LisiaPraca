@@ -1,5 +1,5 @@
 // Zmień numer przy każdej publikacji, żeby telefony pobrały nową wersję.
-const CACHE = 'lisiapraca-v2';
+const CACHE = 'lisiapraca-v3';
 const ASSETS = [
   './',
   'index.html',
@@ -27,7 +27,7 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy));
