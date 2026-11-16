@@ -10,14 +10,15 @@ const $app = document.getElementById('app');
 const DEFAULTS = {
   commission: 25,     // prowizja Ubera od ceny przejazdu, % (tylko do szacunku, zanim będą własne kursy)
   vatCommission: 23,  // VAT doliczany do prowizji, %
-  payMode: 'none',    // jak płaci szef: 'none' | 'pct' (procent od kwoty od Ubera) | 'hour' (zł za godzinę w aplikacji)
-  payValue: 0,
+  payMode: 'pct',     // jak płaci szef: 'none' | 'pct' (procent od kwoty od Ubera) | 'hour' (zł za godzinę w aplikacji)
+  payValue: 50,
 };
+const WEEKLY_COMMISSION_TARGET = 0.3075;
 
 let db = load();
 
 function emptyDb() {
-  return { version: 2, shifts: [], rides: [], fuels: [], settings: { ...DEFAULTS } };
+  return { version: 3, shifts: [], rides: [], fuels: [], settings: { ...DEFAULTS } };
 }
 
 // Przenosi dane ze starszych wersji aplikacji do obecnego układu.
@@ -34,6 +35,15 @@ function migrate(d) {
     }));
     d.fuels = d.fuels.map((f) => ({ ...f, odometer: f.odometer ?? null, full: f.full ?? true }));
     d.version = 2;
+  }
+  if (d.version < 3) {
+    const settings = d.settings || {};
+    if ((!settings.payMode || settings.payMode === 'none') &&
+      (settings.payValue == null || Number(settings.payValue) === 0)) {
+      settings.payMode = DEFAULTS.payMode;
+      settings.payValue = DEFAULTS.payValue;
+    }
+    d.version = 3;
   }
   d.settings = { ...DEFAULTS, ...(d.settings || {}) };
   return d;
@@ -159,6 +169,21 @@ function expectedFinalFromOffer(offer) {
   return c >= 1 ? null : offer * (1 - c - c * v) / (1 - c);
 }
 
+function estimateCustomerGross(r, riderPaid, final, offer) {
+  if (!r || r.cancelled) return null;
+  if (Number.isFinite(riderPaid) && riderPaid >= 0) return { amount: riderPaid, exact: true };
+  if (riderPaid != null) return null;
+  if (Number.isFinite(final) && final > 0) {
+    return { amount: final / (1 - WEEKLY_COMMISSION_TARGET), source: 'final' };
+  }
+  if (final != null && !Number.isFinite(final)) return null;
+  const { c } = rates();
+  if (Number.isFinite(offer) && offer > 0 && c < 1) {
+    return { amount: offer / (1 - c), source: 'offer' };
+  }
+  return null;
+}
+
 function estimateSource() {
   const l = learnedRatio();
   return l ? `z ${plural(l.n, 'twojego kursu', 'twoich kursów', 'twoich kursów')}` : 'wstępny szacunek, do czasu 3 kursów z kwotą z oferty';
@@ -209,6 +234,67 @@ function rideStats(rides, msInApp) {
 
 function shiftStats(s) {
   return rideStats(ridesOf(s.id), new Date(s.end || Date.now()) - new Date(s.start));
+}
+
+function weekStartDate(value) {
+  const date = new Date(value);
+  const source = new Date(date);
+  date.setHours(4, 0, 0, 0);
+  date.setDate(date.getDate() - (date.getDay() + 6) % 7);
+  if (date > source) date.setDate(date.getDate() - 7);
+  return date;
+}
+
+function dateKey(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function weeklyCommissionStats() {
+  const weeks = new Map();
+  db.rides
+    .filter((r) => r.end && !r.cancelled && r.riderPaid > 0 && r.final != null)
+    .forEach((r) => {
+      const start = weekStartDate(r.end);
+      const key = dateKey(start);
+      if (!weeks.has(key)) weeks.set(key, { key, start, gross: 0, paid: 0, rides: 0 });
+      const week = weeks.get(key);
+      week.gross += r.riderPaid;
+      week.paid += r.final;
+      week.rides++;
+    });
+
+  const ensureWeek = (start) => {
+    const key = dateKey(start);
+    if (!weeks.has(key)) weeks.set(key, { key, start, gross: 0, paid: 0, rides: 0 });
+  };
+  [...weeks.values()].forEach((week) => {
+    if (week.gross - week.paid > week.gross * WEEKLY_COMMISSION_TARGET) {
+      const next = new Date(week.start);
+      next.setDate(next.getDate() + 7);
+      ensureWeek(next);
+    }
+  });
+
+  const currentStart = weekStartDate(Date.now());
+  ensureWeek(currentStart);
+  return [...weeks.values()]
+    .filter((week) => week.key <= dateKey(currentStart))
+    .sort((a, b) => b.key.localeCompare(a.key))
+    .map((week) => {
+      const previousStart = new Date(week.start);
+      previousStart.setDate(previousStart.getDate() - 7);
+      const previous = weeks.get(dateKey(previousStart));
+      const commission = week.gross - week.paid;
+      return {
+        ...week,
+        target: week.gross * WEEKLY_COMMISSION_TARGET,
+        commission,
+        previousRefund: previous
+          ? Math.max(0, previous.gross - previous.paid - previous.gross * WEEKLY_COMMISSION_TARGET)
+          : 0,
+      };
+    })
+    .filter((week) => week.rides || week.previousRefund > 0);
 }
 
 // Spalanie metodą „od pełna do pełna”, osobno dla każdego paliwa.
@@ -480,11 +566,12 @@ function viewFinish(id, cancelled) {
   return header('Koniec kursu', true) + `<main>
     <form class="stack" data-form="finish" data-id="${r.id}" novalidate>
       <label>Kwota od Ubera (zł) <span class="opt">${exp != null ? 'spodziewane ok. ' + fmtMoney(exp) : 'kwota po zakończeniu kursu'}</span>
-        ${numInput('final', null, exp != null ? fmtInputNum(Math.round(exp * 100) / 100) : '0,00', 'data-autofocus')}</label>
+        ${numInput('final', null, exp != null ? fmtInputNum(Math.round(exp * 100) / 100) : '0,00', 'data-autofocus data-est="gross" data-estimated="1"')}</label>
       <div class="grid2">
-        <label>Klient zapłacił <span class="opt">opcjonalnie</span>${numInput('riderPaid', null)}</label>
-        <label>Napiwek <span class="opt">opcjonalnie</span>${numInput('tip', null)}</label>
+        <label>Klient zapłacił <span class="opt">opcjonalnie</span>${numInput('riderPaid', null, '0,00', 'data-est="gross"')}</label>
+        <label>Napiwek <span class="opt">opcjonalnie</span>${numInput('tip', null, '0,00', 'data-est="gross"')}</label>
       </div>
+      <p class="hint" data-est-out="gross"></p>
       <label>Skąd <span class="opt">dokładny adres</span><input name="from" list="places" autocomplete="off" value="${esc(r.from)}"></label>
       <label>Dokąd <span class="opt">dokładny adres</span><input name="to" list="places" autocomplete="off" value="${esc(r.to)}"></label>
       <div class="glow go" style="border-radius:var(--radius)"><button class="big go">Zapisz kurs</button></div>
@@ -502,13 +589,14 @@ function viewRideEdit(id) {
       <label>Skąd<input name="from" list="places" autocomplete="off" value="${esc(r.from)}"></label>
       <label>Dokąd<input name="to" list="places" autocomplete="off" value="${esc(r.to)}"></label>
       <div class="grid2">
-        <label>Oferta (zł)${numInput('offer', r.offer)}</label>
-        <label>Od Ubera (zł)${numInput('final', r.final)}</label>
-        <label>Klient zapłacił${numInput('riderPaid', r.riderPaid)}</label>
-        <label>Napiwek${numInput('tip', r.tip)}</label>
+        <label>Oferta (zł)${numInput('offer', r.offer, '0,00', 'data-est="gross"')}</label>
+        <label>Od Ubera (zł)${numInput('final', r.final, '0,00', 'data-est="gross"')}</label>
+        <label>Klient zapłacił${numInput('riderPaid', r.riderPaid, '0,00', 'data-est="gross"')}</label>
+        <label>Napiwek${numInput('tip', r.tip, '0,00', 'data-est="gross"')}</label>
         <label>Szac. dojazd <span class="opt">min</span>${numInput('etaPickup', r.etaPickup, '0')}</label>
         <label>Szac. przejazd <span class="opt">min</span>${numInput('etaTrip', r.etaTrip, '0')}</label>
       </div>
+      <p class="hint" data-est-out="gross"></p>
       ${dt('accepted', 'Przyjęty')}
       ${dt('atPickup', 'Na miejscu')}
       ${dt('tripStart', 'Klient wsiadł')}
@@ -585,6 +673,7 @@ function viewFuel(id) {
 function viewHistory() {
   const shifts = shiftsDesc();
   if (!shifts.length) return header('Historia') + '<main><p class="muted">Jeszcze nie ma żadnej zmiany.</p></main>';
+  const weekly = weeklyCommissionStats();
   const months = [];
   shifts.forEach((s) => {
     const d = new Date(s.start);
@@ -593,7 +682,31 @@ function viewHistory() {
     if (!m) { m = { key, date: d, shifts: [] }; months.push(m); }
     m.shifts.push(s);
   });
-  return header('Historia') + `<main>${months.map((m, i) => {
+  const weeklyHtml = weekly.length ? `<h2>Prowizja Ubera — tygodniowo</h2>
+    ${weekly.map((w) => {
+      const end = new Date(w.start);
+      end.setDate(end.getDate() + 7);
+      const range = `${w.start.toLocaleDateString('pl-PL', { day: 'numeric', month: 'short' })} 04:00–${end.toLocaleDateString('pl-PL', { day: 'numeric', month: 'short', year: 'numeric' })} 04:00`;
+      const current = w.key === dateKey(weekStartDate(Date.now()));
+      const difference = w.commission - w.target;
+      const adjustment = w.rides
+        ? difference > 0.005
+          ? `${current ? 'Możliwy zwrot po zakończeniu tygodnia' : 'Szacowany zwrot w kolejnym tygodniu'}: <b>${fmtMoney(difference)}</b>.`
+          : difference < -0.005
+            ? `Potrącenie jest poniżej celu o <b>${fmtMoney(-difference)}</b>.`
+            : 'Potrącenie jest zgodne z celem tygodniowym.'
+        : '';
+      return `<div class="card glass note" style="margin-bottom:10px">
+        <b>${range}</b>
+        ${w.rides
+          ? `<p>${plural(w.rides, 'kurs', 'kursy', 'kursów')} z kompletem kwot: klienci zapłacili <b>${fmtMoney(w.gross)}</b>, Uber potrącił <b>${fmtMoney(w.commission)}</b>, cel 30,75% to <b>${fmtMoney(w.target)}</b>.</p>
+            <p>${adjustment}</p>`
+          : '<p>Brak kursów z kompletem kwot do wyliczenia prowizji.</p>'}
+        ${w.previousRefund > 0.005 ? `<p>Oczekiwany zwrot z poprzedniego tygodnia: <b>${fmtMoney(w.previousRefund)}</b>.</p>` : ''}
+      </div>`;
+    }).join('')}
+    <p class="hint">Wyliczenie obejmuje zakończone kursy z wpisaną ceną klienta i kwotą od Ubera. Tydzień rozliczeniowy trwa od poniedziałku 04:00 do kolejnego poniedziałku 04:00.</p>` : '';
+  return header('Historia') + `<main>${weeklyHtml}${months.map((m, i) => {
     const ms = m.shifts.reduce((a, s) => a + (new Date(s.end || Date.now()) - new Date(s.start)), 0);
     const st = rideStats(m.shifts.flatMap((s) => ridesOf(s.id)), ms);
     const name = m.date.toLocaleDateString('pl-PL', { month: 'long', year: 'numeric' });
@@ -613,8 +726,9 @@ function viewSettings() {
     <form class="stack" data-form="settings" novalidate>
       <fieldset class="seg" style="grid-template-columns:1fr 1fr 1fr">${mode('none', 'Nie liczę')}${mode('pct', '% od Ubera')}${mode('hour', 'Za godzinę')}</fieldset>
       <label>Wartość <span class="opt">procent albo zł za godzinę w aplikacji</span>${numInput('payValue', s.payValue || null, '0')}</label>
-      <p class="hint" style="margin-top:-6px">Wtedy przy każdej zmianie zobaczysz kwotę „Dla mnie”. Opłaty floty, VAT i resztę rozlicza szef, więc ich tu nie ma.</p>
+      <p class="hint" style="margin-top:-6px">Domyślnie dzielicie po połowie kwotę od Ubera po prowizji i VAT oraz napiwki. Nie odejmujemy kosztów, których nie ponosisz.</p>
       <h2 style="margin-top:12px">Szacunek kwoty z oferty</h2>
+      <p class="hint">Prowizja może się różnić między kursami; tygodniowy cel z VAT to 30,75%. Nadwyżka jest rozliczana zwrotem w kolejnym tygodniu.</p>
       <div class="card glass note">${l
         ? `Od Ubera przychodzi średnio <b>${fmtPct(l.ratio)}</b> kwoty z oferty (z ${plural(l.n, 'twojego kursu', 'twoich kursów', 'twoich kursów')}). Tego używam przy nowych ofertach.`
         : 'Gdy zapiszesz 3 kursy z kwotą z oferty i kwotą od Ubera, szacunek będzie liczony z twoich kursów. Do tego czasu korzystam ze stawek poniżej.'}</div>
@@ -636,6 +750,13 @@ function viewSettings() {
       <label class="btn ghost file-btn">Przywróć z kopii<input type="file" accept="application/json,.json" data-act="importJson"></label>
     </div>
     <p class="hint">Dane są zapisane tylko na tym telefonie. Rób kopię zapasową co jakiś czas, np. raz w tygodniu.</p>
+    <h2>Kasowanie danych</h2>
+    <p class="hint">Pojedynczy kurs lub tankowanie usuniesz w jego szczegółach. Możesz też wyczyścić całą wybraną kategorię.</p>
+    <div class="tools">
+      <button class="btn danger" data-act="clearFuelData">Usuń wszystkie tankowania</button>
+      <button class="btn danger" data-act="clearRideData">Usuń wszystkie kursy</button>
+      <button class="btn danger" data-act="resetData">Zresetuj całą aplikację</button>
+    </div>
   </main>`;
 }
 
@@ -657,6 +778,31 @@ function updateEstimates() {
     const final = 100 * (1 - c - c * v);
     setOut.innerHTML = `Przykład: klient płaci <b>100,00 zł</b> → oferta w aplikacji <b>${nf(100 * (1 - c))} zł</b> →
       od Ubera <b>${nf(final)} zł</b> (prowizja z VAT ${nf(100 - final)} zł).`;
+  }
+  const grossOut = $app.querySelector('[data-est-out="gross"]');
+  const grossForm = $app.querySelector('form[data-form="finish"], form[data-form="rideEdit"]');
+  if (grossOut && grossForm) {
+    const r = db.rides.find((ride) => ride.id === grossForm.dataset.id);
+    if (!r) return;
+    const input = (name, fallback) => grossForm.elements[name]
+      ? parseNum(grossForm.elements[name].value)
+      : fallback;
+    const finalInput = grossForm.elements.final;
+    const final = finalInput && finalInput.dataset.estimated
+      ? null
+      : input('final', r.final);
+    const estimate = estimateCustomerGross(r, input('riderPaid', r.riderPaid), final, input('offer', r.offer));
+    const tip = input('tip', r.tip);
+    const tipNote = Number.isFinite(tip) && tip > 0 ? ` Napiwek osobno: ${fmtMoney(tip)}.` : '';
+    if (!estimate) {
+      grossOut.textContent = 'Wpisz kwotę klienta, kwotę od Ubera albo ofertę, aby zobaczyć brutto.';
+    } else if (estimate.exact) {
+      grossOut.textContent = `Wpisana kwota brutto przejazdu od klienta: ${fmtMoney(estimate.amount)}.${tipNote}`;
+    } else if (estimate.source === 'final') {
+      grossOut.textContent = `Szacowane brutto przejazdu (bez napiwku): ${fmtMoney(estimate.amount)}. Szacunek z kwoty od Ubera przy tygodniowym celu prowizji 30,75%; stawka na tym kursie mogła być inna.${tipNote}`;
+    } else {
+      grossOut.textContent = `Szacowane brutto przejazdu (bez napiwku): ${fmtMoney(estimate.amount)}. Szacunek z oferty przy prowizji podstawowej ${fmtPct(rates().c)}.${tipNote}`;
+    }
   }
 }
 
@@ -710,6 +856,33 @@ const actions = {
     db.fuels = db.fuels.filter((f) => f.id !== el.dataset.id);
     save();
     done('#/auto');
+  },
+
+  async clearFuelData() {
+    if (!db.fuels.length) { toast('Nie ma tankowań do usunięcia.'); return; }
+    if (!(await ask(`Usunąć wszystkie ${plural(db.fuels.length, 'tankowanie', 'tankowania', 'tankowań')}? Kursy i zmiany zostaną zachowane.`, 'Usuń wszystko', { danger: true }))) return;
+    db.fuels = [];
+    save();
+    toast('Usunięto wszystkie tankowania');
+    route();
+  },
+
+  async clearRideData() {
+    if (!db.rides.length) { toast('Nie ma kursów do usunięcia.'); return; }
+    if (!(await ask(`Usunąć wszystkie ${plural(db.rides.length, 'kurs', 'kursy', 'kursów')}, także otwarte? Zmiany i tankowania zostaną zachowane.`, 'Usuń wszystko', { danger: true }))) return;
+    db.rides = [];
+    save();
+    toast('Usunięto wszystkie kursy');
+    route();
+  },
+
+  async resetData() {
+    const summary = `${plural(db.shifts.length, 'zmianę', 'zmiany', 'zmian')}, ${plural(db.rides.length, 'kurs', 'kursy', 'kursów')}, ${plural(db.fuels.length, 'tankowanie', 'tankowania', 'tankowań')} oraz ustawienia`;
+    if (!(await ask(`Zresetować całą aplikację? Zostaną usunięte ${summary}. Tej operacji nie da się cofnąć.`, 'Zresetuj', { danger: true }))) return;
+    db = emptyDb();
+    save();
+    toast('Zresetowano aplikację');
+    route();
   },
 
   async deleteShift(el) {
@@ -923,6 +1096,7 @@ $app.addEventListener('submit', (e) => {
 });
 
 $app.addEventListener('input', (e) => {
+  if (e.target.name === 'final' && e.target.dataset.estimated) e.target.dataset.estimated = '';
   if (e.target.dataset.est) updateEstimates();
   e.target.classList.remove('bad');
 });

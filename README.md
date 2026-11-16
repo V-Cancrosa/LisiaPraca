@@ -12,17 +12,21 @@ Aplikacja na telefon (PWA) dla kierowcy jeżdżącego dla Ubera we flocie.
   2. **Jestem na miejscu** → 3. **Klient wsiadł** → 4. **Koniec kursu:** kwota od Ubera, opcjonalnie cena zapłacona przez klienta, napiwek i dokładne adresy.
   - Kurs anulowany, z opcjonalną opłatą za anulowanie.
 - **Rozliczenie:** dla każdego kursu zapisuję osobno kwotę z oferty i kwotę od Ubera, więc widać, ile Uber faktycznie potrącił, nawet gdy zmienia prowizję. Po 3 takich kursach szacunek dla nowych ofert liczy się z twoich danych.
-- **Wypłata od szefa (opcjonalnie):** procent od kwoty od Ubera albo stawka godzinowa. Daje kwotę „Dla mnie” przy każdej zmianie.
+- **Brutto kursu:** w szczegółach kursu aplikacja pokazuje wpisaną kwotę klienta albo szacuje ją z kwoty od Ubera/oferty. To przybliżenie, bo prowizja różni się między kursami.
+- **Prowizja tygodniowa:** prowizja może się różnić między kursami, ale cel z VAT wynosi 30,75% tygodniowych płatności klientów. W Historii aplikacja porównuje wpisane kwoty z tym celem i pokazuje szacowaną nadwyżkę do zwrotu w następnym tygodniu.
+- **Podział z szefem:** domyślnie 50:50 od kwoty otrzymanej od Ubera po prowizji i VAT, razem z napiwkami. Nie odejmujemy kosztów kierowcy. Udział można zmienić w Ustawieniach.
 - **Auto:** tankowania LPG i benzyny ze stanem licznika. Spalanie liczę metodą „od pełna do pełna”, osobno dla każdego paliwa, niezależnie od komputera auta. Paliwo z karty flotowej nie zmniejsza zarobku.
 - **Historia:** zmiany pogrupowane po miesiącach.
 - **Dane:** eksport kursów i tankowań do Excela (CSV), kopia zapasowa i przywracanie.
+- **Kasowanie:** pojedynczy kurs lub tankowanie można usunąć w jego szczegółach. W Ustawieniach można usunąć wszystkie tankowania, wszystkie kursy (pozostawiając zmiany) albo zresetować całą aplikację wraz z ustawieniami.
 
 ## Jak liczony jest szacunek z oferty
 
-Kwota w ofercie Ubera jest już po prowizji, ale przed VAT od prowizji, więc od Ubera przychodzi mniej.
-Dopóki nie ma własnych kursów, aplikacja przyjmuje prowizję 25% i VAT od prowizji 23% (dane z internetu):
+Kwota w ofercie Ubera jest już po prowizji, ale przed VAT od prowizji, więc od Ubera przychodzi mniej. Prowizja na pojedynczych kursach jest zmienna; tygodniowy cel to 30,75% kwot zapłaconych przez klientów, a nadwyżka jest zwracana w kolejnym tygodniu.
+Dopóki nie ma własnych kursów, aplikacja szacuje prowizję na podstawie 25% prowizji i 23% VAT od niej:
 klient płaci 100 zł → oferta 75,00 zł → od Ubera 69,25 zł.
 Po 3 kursach z wpisaną kwotą z oferty i kwotą od Ubera używa średniej z ostatnich 30 twoich kursów.
+Tygodniowe zestawienie w Historii liczy tylko zakończone kursy, dla których wpisano cenę klienta i kwotę od Ubera. Tydzień rozliczeniowy trwa od poniedziałku 04:00 do kolejnego poniedziałku 04:00.
 
 ## Urządzenie docelowe
 
