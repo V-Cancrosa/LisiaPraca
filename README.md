@@ -24,10 +24,19 @@ Dopóki nie ma własnych kursów, aplikacja przyjmuje prowizję 25% i VAT od pro
 klient płaci 100 zł → oferta 75,00 zł → od Ubera 69,25 zł.
 Po 3 kursach z wpisaną kwotą z oferty i kwotą od Ubera używa średniej z ostatnich 30 twoich kursów.
 
-## Instalacja na telefonie
+## Urządzenie docelowe
 
-Otwórz link w Chrome → menu ⋮ → **Zainstaluj aplikację** (albo „Dodaj do ekranu głównego”).
-Po instalacji aplikacja działa także bez internetu.
+Aplikacja jest robiona i testowana pod **OPPO Reno12 Pro 5G** (model CPH2629, ColorOS 16, ekran 6,7″),
+czyli widok o szerokości ok. 412 px w Chrome. Na innych telefonach też działa, ale układ jest dopasowany do tego.
+
+## Instalacja na telefonie (OPPO / ColorOS)
+
+1. Otwórz link w **Chrome**, a nie w wbudowanej przeglądarce ColorOS. Pełną instalację aplikacji webowej obsługuje Chrome.
+2. Menu ⋮ → **Zainstaluj aplikację** (albo „Dodaj do ekranu głównego”).
+3. Uruchamiaj aplikację z ikony lisa na ekranie głównym. Działa wtedy na pełnym ekranie i bez internetu.
+
+Dane aplikacji są przechowywane w Chrome. Jeśli w ColorOS wyczyścisz dane Chrome (Ustawienia → Aplikacje → Chrome → Pamięć → Wyczyść dane),
+stracisz zapisane zmiany i kursy. Zwykłe „czyszczenie pamięci podręcznej” ich nie usuwa, ale kopia zapasowa jest i tak najpewniejsza.
 
 ## Dane
 
