@@ -210,7 +210,7 @@ button { font: inherit; cursor: pointer; }
 /* ---------- Formularze ---------- */
 
 form.stack { display: flex; flex-direction: column; gap: 16px; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 12px; align-items: end; }
 label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: .92rem; min-width: 0; }
 label .opt { color: var(--muted); font-weight: 400; font-size: .85rem; }
 input[type=text], input[type=datetime-local], input:not([type]) {
